@@ -11,19 +11,18 @@ network(const double *z, const unsigned int n, const unsigned int *tri, const un
 	PyArrayObject *net;
 	npy_intp *dim;
 	unsigned int i, j, k, l;
-	unsigned int *lst[n], *lp, *e;
+	unsigned int *lst[n], *e;
 	unsigned int u, v, w, vex, wex;
 	
 	// alloc list of arrays
 	for(i = 0; i < n; i++) {
-		lp = malloc(8 * sizeof(unsigned int));
-		if(!lp) {
-			PyErr_SetString(PyExc_MemoryError, "...");
+		lst[i] = malloc(8 * sizeof(unsigned int));
+		if(!lst[i]) {
+			PyErr_SetString(PyExc_MemoryError, "malloc of list of arrays failed.");
 			return NULL;
 		}
-		lp[0] = 8;
-		lp[1] = 2;
-		lst[i] = lp;
+		lst[i][0] = 8;
+		lst[i][1] = 2;
 	}
 
 	// retrieve downwards pointing links from the triangulation
@@ -35,25 +34,28 @@ network(const double *z, const unsigned int n, const unsigned int *tri, const un
 			w = tri[i+(j+2)%3];
 			if(z[v] >= z[u] && z[w] >= z[u])
 				continue;
-			lp = lst[u];
 			vex = wex = 0;
-			for(k = 2; k < lp[1]; k++) {
-				if(lp[k] == v)
+			for(k = 2; k < lst[u][1]; k++) {
+				if(lst[u][k] == v)
 					vex = 1;
-				if(lp[k] == w)
+				if(lst[u][k] == w)
 					wex = 1;
 			}
 			if(!vex && z[v] < z[u]) {
-				lp[lp[1]++] = v;
+				lst[u][lst[u][1]++] = v;
 				l++;
 			}
 			if(!wex && z[w] < z[u]) {
-				lp[lp[1]++] = w;
+				lst[u][lst[u][1]++] = w;
 				l++;
 			}
-			if(lp[1] >= lp[0]) {
-				lp[0] = lp[1] + 2;
-				lp = realloc(lp, lp[0] * sizeof(unsigned int));
+			if(lst[u][0] < lst[u][1] + 2) {
+				lst[u][0] = lst[u][1] + 4;
+				lst[u] = realloc(lst[u], lst[u][0] * sizeof(unsigned int));
+				if(!lst[u]) {
+					PyErr_SetString(PyExc_MemoryError, "realloc of array in list failed.");
+					return NULL;
+				}
 			}
 		}
 	}
@@ -72,12 +74,11 @@ network(const double *z, const unsigned int n, const unsigned int *tri, const un
 	// store in compressed row format
 	j = n + 1;
 	for(i = 0; i < n; i++) {
-		lp = lst[i];
 		e[i] = j;
-		for(k = 2; k < lp[1]; k++) {
-			e[j++] = lp[k];
+		for(k = 2; k < lst[i][1]; k++) {
+			e[j++] = lst[i][k];
 		}
-		free(lp);
+		free(lst[i]);
 	}
 	e[n] = j;
 	return net;
