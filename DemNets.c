@@ -131,7 +131,7 @@ betweenness(const unsigned int *net, const double *lw, const double *nw) {
                 if(lw[k] > lwmax)
                     lwmax = lw[k];
             for(k = net[i]; k < net[i+1]; k++) {
-                if(lw[k] < 0.9 * lwmax)
+                if(lw[k] < 0.3333 * lwmax)
                     continue;
                 l = net[k];
                 if(no[l]) {
@@ -164,7 +164,7 @@ betweenness(const unsigned int *net, const double *lw, const double *nw) {
                 if(lw[k] > lwmax)
                     lwmax = lw[k];
             for(k = net[i]; k < net[i+1]; k++) {
-                if(lw[k] < 0.9 * lwmax)
+                if(lw[k] < 0.3333 * lwmax)
                     continue;
                 l = net[k];
                 /* follow only shortest paths */
