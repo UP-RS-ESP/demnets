@@ -208,6 +208,120 @@ betweenness(const unsigned int *net, const double *lw, const double *nw) {
 }
 
 static PyArrayObject *
+distances(const double *x, const double *y, const double *z, const unsigned int *net) {
+    PyArrayObject *dst;
+    npy_intp *dim;
+    unsigned int i, j, k, n;
+    double *d;
+    double dx, dy, dz;
+    double xi, yi, zi;
+
+    // alloc numpy array
+    n = net[0] - 1;
+    dim = malloc(sizeof(npy_intp));
+    dim[0] = net[n];
+    dst = (PyArrayObject *) PyArray_ZEROS(1, dim, PyArray_DOUBLE, 0);
+    free(dim);
+    if(!dst) {
+        PyErr_SetString(PyExc_MemoryError, "...");
+        return NULL;
+    }
+    d = (double *) dst->data;
+
+    // estimate 2-norm link distances i->j
+    for(i = 0; i < n; i++) {
+        xi = x[i];
+        yi = y[i];
+        zi = z[i];
+        for(k = net[i]; k < net[i+1]; k++) {
+            j = net[k];
+            dx = xi - x[j];
+            dy = yi - y[j];
+            dz = zi - z[j];
+            d[k] = sqrt(dx*dx + dy*dy + dz*dz);
+        }
+    }
+    return dst;
+}
+
+static PyArrayObject *
+flowdistance(const unsigned int *net, const double *lw, const double *ld, const unsigned int iter) {
+    PyArrayObject *dst;
+    npy_intp *dim;
+    unsigned int i, k, l, u, v;
+    unsigned int n, m, o, oset, nbrs;
+    double *cum, p;
+    double *c, *d;
+
+    if(!initrng())
+        return NULL;
+
+    n = net[0] - 1;
+#pragma omp parallel
+    m = omp_get_num_threads();
+
+    c = calloc(n * m, sizeof(double));
+    if(!c) {
+        PyErr_SetString(PyExc_MemoryError, "...");
+        return NULL;
+    }
+
+#pragma omp parallel for private(i,k,l,u,v,p,cum,oset,nbrs)
+    for(i = 0; i < n * iter; i++) {
+        oset = n * omp_get_thread_num();
+        o = i % n;
+        u = o;
+        nbrs = net[u+1] - net[u];
+        while(nbrs) {
+            cum = malloc(nbrs * sizeof(double));
+            l = 0;
+            cum[l++] = lw[net[u]];
+            for(k = net[u] + 1; k < net[u+1]; k++) {
+                cum[l] = cum[l-1] + lw[k];
+                l++;
+            }
+            p = cum[nbrs-1] * drand48();
+            l = 0;
+            for(k = net[u]; k < net[u+1]; k++) {
+                if(p < cum[l++]) {
+                    v = net[k];
+                    break;
+                }
+            }
+            free(cum);
+            nbrs = net[v+1] - net[v];
+            c[o + oset] += ld[k];
+            u = v;
+        }
+    }
+    /* end parallel for */
+
+    // alloc numpy array
+    dim = malloc(sizeof(npy_intp));
+    dim[0] = n;
+    dst = (PyArrayObject *) PyArray_ZEROS(1, dim, PyArray_DOUBLE, 0);
+    free(dim);
+    if(!dst) {
+        PyErr_SetString(PyExc_MemoryError, "...");
+        return NULL;
+    }
+    d = (double *) dst->data;
+
+    /* reduction of threaded array into numpy */
+    for(i = 0; i < m; i++) {
+        oset = i * n;
+        for(k = 0; k < n; k++)
+            d[k] += c[k + oset];
+    }
+    free(c);
+    // average
+    for(k = 0; k < n; k++)
+        d[k] /= iter;
+
+    return dst;
+}
+
+static PyArrayObject *
 network(const double *z, const unsigned int n, const unsigned int *tri, const unsigned int m) {
     PyArrayObject *net;
     npy_intp *dim;
@@ -387,6 +501,7 @@ throughput(const unsigned int *net, const double *lw, const double *nw, const un
     free(c);
     return tput;
 }
+
 static PyObject *
 DemNets_Betweenness(PyObject *self, PyObject* args) {
     PyObject *netarg, *lwarg, *nwarg;
@@ -424,6 +539,93 @@ DemNets_Betweenness(PyObject *self, PyObject* args) {
     Py_DECREF(wlinks);
     Py_DECREF(wnodes);
     return PyArray_Return(b);
+}
+
+static PyObject *
+DemNets_Distances(PyObject *self, PyObject* args) {
+    PyObject *xarg, *yarg, *zarg, *netarg;
+    PyArrayObject *x, *y, *z;
+    PyArrayObject *net, *dst;
+    unsigned int *e, n;
+
+    // parse input
+    if(!PyArg_ParseTuple(args, "OOOO", &xarg, &yarg, &zarg, &netarg))
+        return NULL;
+    x = (PyArrayObject *) PyArray_ContiguousFromObject(xarg, PyArray_DOUBLE, 1, 1);
+    y = (PyArrayObject *) PyArray_ContiguousFromObject(yarg, PyArray_DOUBLE, 1, 1);
+    z = (PyArrayObject *) PyArray_ContiguousFromObject(zarg, PyArray_DOUBLE, 1, 1);
+    net = (PyArrayObject *) PyArray_ContiguousFromObject(netarg, PyArray_UINT, 1, 1);
+    if(!x || !y || !z || !net)
+        return NULL;
+
+    // check input
+    n = x->dimensions[0];
+    if(n != y->dimensions[0]) {
+        PyErr_SetString(PyExc_IndexError, "(x, y) not of the same dimension.");
+        return NULL;
+    }
+    if(n != z->dimensions[0]) {
+        PyErr_SetString(PyExc_IndexError, "(x, y, z) not of the same dimension.");
+        return NULL;
+    }
+    e = (unsigned int *) net->data;
+    if(n != e[0] - 1) {
+        PyErr_SetString(PyExc_IndexError, "(x, y, z) does not match with the network.");
+        return NULL;
+    }
+    if(e[n] != net->dimensions[0]) {
+        PyErr_SetString(PyExc_IndexError, "corrupted network format.");
+        return NULL;
+    }
+
+    // get link distances
+    dst = distances((double *)x->data, (double *)y->data, (double *)z->data, e);
+
+    Py_DECREF(x);
+    Py_DECREF(y);
+    Py_DECREF(z);
+    Py_DECREF(net);
+    return PyArray_Return(dst);
+}
+
+static PyObject *
+DemNets_FlowDistance(PyObject *self, PyObject* args) {
+    PyObject *netarg, *lwarg, *ldarg;
+    PyArrayObject *wlinks, *dlinks, *net, *d;
+    unsigned int *e, iter;
+
+    // parse input
+    iter = 100;
+    if(!PyArg_ParseTuple(args, "OOO|I", &netarg, &lwarg, &ldarg, &iter))
+        return NULL;
+    net = (PyArrayObject *) PyArray_ContiguousFromObject(netarg, PyArray_UINT, 1, 1);
+    wlinks = (PyArrayObject *) PyArray_ContiguousFromObject(lwarg, PyArray_DOUBLE, 1, 1);
+    dlinks = (PyArrayObject *) PyArray_ContiguousFromObject(ldarg, PyArray_DOUBLE, 1, 1);
+    if(!net || !wlinks || !dlinks)
+        return NULL;
+
+    // check input
+    e = (unsigned int *) net->data;
+    if(e[e[0] - 1] != net->dimensions[0]) {
+        PyErr_SetString(PyExc_IndexError, "corrupted network format.");
+        return NULL;
+    }
+    if(e[e[0] - 1] != wlinks->dimensions[0]) {
+        PyErr_SetString(PyExc_IndexError, "link-weight array does not match network.");
+        return NULL;
+    }
+    if(e[e[0] - 1] != dlinks->dimensions[0]) {
+        PyErr_SetString(PyExc_IndexError, "link-length array does not match network.");
+        return NULL;
+    }
+
+    // get node throughput
+    d = flowdistance(e, (double *)wlinks->data, (double *)dlinks->data, iter);
+
+    Py_DECREF(net);
+    Py_DECREF(wlinks);
+    Py_DECREF(dlinks);
+    return PyArray_Return(d);
 }
 
 static PyObject *
@@ -535,7 +737,9 @@ DemNets_Throughput(PyObject *self, PyObject* args) {
 
 static PyMethodDef DemNets_methods[] = {
     {"Betweenness", DemNets_Betweenness, METH_VARARGS, "..."},
+    {"Distances", DemNets_Distances, METH_VARARGS, "..."},
     {"FlowNetwork", DemNets_FlowNetwork, METH_VARARGS, "..."},
+    {"FlowDistance", DemNets_FlowDistance, METH_VARARGS, "..."},
     {"Slopes", DemNets_Slopes, METH_VARARGS, "..."},
     {"Throughput", DemNets_Throughput, METH_VARARGS, "..."},
     {NULL, NULL, 0, NULL}
