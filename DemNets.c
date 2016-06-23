@@ -208,11 +208,11 @@ betweenness(const unsigned int *net, const double *lw, const double *nw) {
 }
 
 static PyArrayObject *
-distances(const double *x, const double *y, const double *z, const unsigned int *net) {
-    PyArrayObject *dst;
+linklengths(const double *x, const double *y, const double *z, const unsigned int *net) {
+    PyArrayObject *lln;
     npy_intp *dim;
     unsigned int i, j, k, n;
-    double *d;
+    double *l;
     double dx, dy, dz;
     double xi, yi, zi;
 
@@ -220,13 +220,13 @@ distances(const double *x, const double *y, const double *z, const unsigned int 
     n = net[0] - 1;
     dim = malloc(sizeof(npy_intp));
     dim[0] = net[n];
-    dst = (PyArrayObject *) PyArray_ZEROS(1, dim, PyArray_DOUBLE, 0);
+    lln = (PyArrayObject *) PyArray_ZEROS(1, dim, PyArray_DOUBLE, 0);
     free(dim);
-    if(!dst) {
+    if(!lln) {
         PyErr_SetString(PyExc_MemoryError, "...");
         return NULL;
     }
-    d = (double *) dst->data;
+    l = (double *) lln->data;
 
     // estimate 2-norm link distances i->j
     for(i = 0; i < n; i++) {
@@ -238,10 +238,10 @@ distances(const double *x, const double *y, const double *z, const unsigned int 
             dx = xi - x[j];
             dy = yi - y[j];
             dz = zi - z[j];
-            d[k] = sqrt(dx*dx + dy*dy + dz*dz);
+            l[k] = sqrt(dx*dx + dy*dy + dz*dz);
         }
     }
-    return dst;
+    return lln;
 }
 
 static PyArrayObject *
@@ -542,10 +542,10 @@ DemNets_Betweenness(PyObject *self, PyObject* args) {
 }
 
 static PyObject *
-DemNets_Distances(PyObject *self, PyObject* args) {
+DemNets_LinkLengths(PyObject *self, PyObject* args) {
     PyObject *xarg, *yarg, *zarg, *netarg;
     PyArrayObject *x, *y, *z;
-    PyArrayObject *net, *dst;
+    PyArrayObject *net, *lln;
     unsigned int *e, n;
 
     // parse input
@@ -579,13 +579,13 @@ DemNets_Distances(PyObject *self, PyObject* args) {
     }
 
     // get link distances
-    dst = distances((double *)x->data, (double *)y->data, (double *)z->data, e);
+    lln = linklengths((double *)x->data, (double *)y->data, (double *)z->data, e);
 
     Py_DECREF(x);
     Py_DECREF(y);
     Py_DECREF(z);
     Py_DECREF(net);
-    return PyArray_Return(dst);
+    return PyArray_Return(lln);
 }
 
 static PyObject *
@@ -737,9 +737,9 @@ DemNets_Throughput(PyObject *self, PyObject* args) {
 
 static PyMethodDef DemNets_methods[] = {
     {"Betweenness", DemNets_Betweenness, METH_VARARGS, "..."},
-    {"Distances", DemNets_Distances, METH_VARARGS, "..."},
     {"FlowNetwork", DemNets_FlowNetwork, METH_VARARGS, "..."},
     {"FlowDistance", DemNets_FlowDistance, METH_VARARGS, "..."},
+    {"LinkLengths", DemNets_LinkLengths, METH_VARARGS, "..."},
     {"Slopes", DemNets_Slopes, METH_VARARGS, "..."},
     {"Throughput", DemNets_Throughput, METH_VARARGS, "..."},
     {NULL, NULL, 0, NULL}
