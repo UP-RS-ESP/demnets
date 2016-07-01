@@ -6,6 +6,8 @@
 
 #define VERSION "0.1"
 
+#define MAXPATHLEN 10000
+
 typedef struct Stack Stack;
 typedef struct Queue Queue;
 typedef struct Node Node;
@@ -238,6 +240,7 @@ linklengths(const double *x,
 
     // estimate 2-norm link distances i->j
     for(i = 0; i < n; i++) {
+        l[i] = net[i];
         xi = x[i];
         yi = y[i];
         zi = z[i];
@@ -249,6 +252,7 @@ linklengths(const double *x,
             l[k] = sqrt(dx*dx + dy*dy + dz*dz);
         }
     }
+    l[n] = net[n];
     return lln;
 }
 
@@ -266,12 +270,8 @@ linksinks(const unsigned int *net,
 
     n = net[0] - 1;
     m = 0;
-    len = 2 + n / 10;
-    list = malloc(len * sizeof(unsigned int));
-    if(!list) {
-        PyErr_SetString(PyExc_MemoryError, "...");
-        exit(EXIT_FAILURE);
-    }
+    list = NULL;
+    len = 0;
     for(j = 0; j < n; j++) {
         if(net[j] == net[j+1]) {
             zj = z[j];
@@ -305,6 +305,7 @@ linksinks(const unsigned int *net,
                     l = net[k];
                     if(seen[l])
                         continue;
+                    //fprintf(stderr, "(%i) %.3f: %e\n", d, zj, z[l]);
                     if(z[l] <= zj) {
                         list[m++] = j;
                         list[m++] = l;
@@ -319,6 +320,7 @@ linksinks(const unsigned int *net,
                     l = ten[k];
                     if(seen[l])
                         continue;
+                    //fprintf(stderr, "(%i) %.3f: %e\n", d, zj, z[l]);
                     if(z[l] <= zj) {
                         list[m++] = j;
                         list[m++] = l;
@@ -332,10 +334,15 @@ linksinks(const unsigned int *net,
             free(que);
         }
     }
+    if(!m) {
+        free(list);
+        PyErr_SetString(PyExc_RuntimeError, "no sink was linked.");
+        return NULL;
+    }
 
     // alloc numpy array
     dim = malloc(sizeof(npy_intp));
-    dim[0] = n + m + 1;
+    dim[0] = n + m/2 + 1;
     new = (PyArrayObject *) PyArray_ZEROS(1, dim, PyArray_UINT, 0);
     free(dim);
     if(!new) {
@@ -349,12 +356,13 @@ linksinks(const unsigned int *net,
     j = n + 1;
     for(i = 0; i < n; i++) {
         e[i] = j;
-        if(list[l] == i) {
+        while(list[l] == i) {
             e[j++] = list[++l];
             l++;
         }
     }
     e[n] = j;
+    free(list);
     return new;
 }
 
@@ -558,36 +566,74 @@ network(const double *z,
 }
 
 static PyArrayObject *
+fusenetworks(const unsigned int *u,
+             const unsigned int *v) {
+    PyArrayObject *new;
+    npy_intp *dim;
+    unsigned int i, j, k, n;
+    unsigned int *w;
+
+    n = u[0] - 1;
+
+    // alloc numpy array
+    dim = malloc(sizeof(npy_intp));
+    dim[0] = u[n] + v[n] - n - 1;
+    new = (PyArrayObject *) PyArray_ZEROS(1, dim, PyArray_UINT, 0);
+    free(dim);
+    if(!new) {
+        PyErr_SetString(PyExc_MemoryError, "...");
+        return NULL;
+    }
+    w = (unsigned int *) new->data;
+
+    // store in compressed row format
+    j = n + 1;
+    for(i = 0; i < n; i++) {
+        w[i] = j;
+        for(k = u[i]; k < u[i+1]; k++)
+            w[j++] = u[k];
+        for(k = v[i]; k < v[i+1]; k++)
+            w[j++] = v[k];
+    }
+    w[n] = j;
+    return new;
+}
+
+static PyArrayObject *
 slopes(const double *x,
        const double *y,
        const double *z,
-       const unsigned int *net) {
+       const unsigned int *net,
+       const double scale) {
     PyArrayObject *slp;
     npy_intp *dim;
     unsigned int i, j, k, n;
-    double *s, dx, dy;
+    unsigned int *s;
+    double dx, dy;
 
     // alloc numpy array
     n = net[0] - 1;
     dim = malloc(sizeof(npy_intp));
     dim[0] = net[n];
-    slp = (PyArrayObject *) PyArray_ZEROS(1, dim, PyArray_DOUBLE, 0);
+    slp = (PyArrayObject *) PyArray_ZEROS(1, dim, PyArray_UINT, 0);
     free(dim);
     if(!slp) {
         PyErr_SetString(PyExc_MemoryError, "...");
         return NULL;
     }
-    s = (double *) slp->data;
+    s = (unsigned int *) slp->data;
 
     // estimate slopes along links
     for(i = 0; i < n; i++) {
+        s[i] = net[i];
         for(k = net[i]; k < net[i+1]; k++) {
             j = net[k];
             dx = x[i] - x[j];
             dy = y[i] - y[j];
-            s[k] = (z[i] - z[j]) / sqrt(dx*dx + dy*dy);
+            s[k] = scale * fabs(z[i] - z[j]) / sqrt(dx*dx + dy*dy);
         }
     }
+    s[n] = net[n];
     return slp;
 }
 
@@ -598,7 +644,7 @@ throughput(const unsigned int *net,
            const unsigned int iter) {
     PyArrayObject *tput;
     npy_intp *dim;
-    unsigned int i, k, l, u, v;
+    unsigned int i, k, l, u, v, o;
     unsigned int n, m, oset, nbrs;
     unsigned long *c, *t;
     double *cum, p;
@@ -616,12 +662,13 @@ throughput(const unsigned int *net,
         return NULL;
     }
 
-#pragma omp parallel for private(i,k,l,u,v,p,cum,oset,nbrs)
+#pragma omp parallel for private(i,k,l,o,u,v,p,cum,oset,nbrs)
     for(i = 0; i < n * iter; i++) {
         oset = n * omp_get_thread_num();
         u = i % n;
+        o = 0;
         nbrs = net[u+1] - net[u];
-        while(nbrs) {
+        while(nbrs && o < MAXPATHLEN) {
             cum = malloc(nbrs * sizeof(double));
             l = 0;
             cum[l++] = lw[net[u]];
@@ -641,6 +688,7 @@ throughput(const unsigned int *net,
             nbrs = net[v+1] - net[v];
             c[v + oset] += 1;
             u = v;
+            o++;
         }
     }
     /* end parallel for */
@@ -753,6 +801,41 @@ DemNets_LinkLengths(PyObject *self, PyObject* args) {
 }
 
 static PyObject *
+DemNets_FuseNetworks(PyObject *self, PyObject* args) {
+    PyObject *a, *b;
+    PyArrayObject *u, *v, *w;
+    unsigned int *x, *y, n;
+
+    // parse input
+    if(!PyArg_ParseTuple(args, "OO", &a, &b))
+        return NULL;
+    u = (PyArrayObject *) PyArray_ContiguousFromObject(a, PyArray_UINT, 1, 1);
+    v = (PyArrayObject *) PyArray_ContiguousFromObject(b, PyArray_UINT, 1, 1);
+    if(!u || !v)
+        return NULL;
+
+    // check input
+    x = (unsigned int *) u->data;
+    y = (unsigned int *) v->data;
+    if(x[0] != y[0]) {
+        PyErr_SetString(PyExc_IndexError, "networks do not match.");
+        return NULL;
+    }
+    if(x[x[0]-1] != u->dimensions[0]) {
+        PyErr_SetString(PyExc_IndexError, "corrupted format for the first network.");
+        return NULL;
+    }
+    if(y[y[0]-1] != v->dimensions[0]) {
+        PyErr_SetString(PyExc_IndexError, "corrupted format for the second network.");
+        return NULL;
+    }
+    w = fusenetworks(x, y);
+    Py_DECREF(u);
+    Py_DECREF(v);
+    return PyArray_Return(w);
+}
+
+static PyObject *
 DemNets_FlowDistance(PyObject *self, PyObject* args) {
     PyObject *netarg, *lwarg, *ldarg;
     PyArrayObject *wlinks, *dlinks, *net, *d;
@@ -858,9 +941,11 @@ DemNets_Slopes(PyObject *self, PyObject* args) {
     PyArrayObject *x, *y, *z;
     PyArrayObject *net, *slp;
     unsigned int *e, n;
+    double scale;
 
     // parse input
-    if(!PyArg_ParseTuple(args, "OOOO", &xarg, &yarg, &zarg, &netarg))
+    scale = 100000;
+    if(!PyArg_ParseTuple(args, "OOOO|d", &xarg, &yarg, &zarg, &netarg, &scale))
         return NULL;
     x = (PyArrayObject *) PyArray_ContiguousFromObject(xarg, PyArray_DOUBLE, 1, 1);
     y = (PyArrayObject *) PyArray_ContiguousFromObject(yarg, PyArray_DOUBLE, 1, 1);
@@ -890,7 +975,7 @@ DemNets_Slopes(PyObject *self, PyObject* args) {
     }
 
     // get slopes
-    slp = slopes((double *)x->data, (double *)y->data, (double *)z->data, e);
+    slp = slopes((double *)x->data, (double *)y->data, (double *)z->data, e, scale);
 
     Py_DECREF(x);
     Py_DECREF(y);
@@ -941,6 +1026,7 @@ DemNets_Throughput(PyObject *self, PyObject* args) {
 
 static PyMethodDef DemNets_methods[] = {
     {"Betweenness", DemNets_Betweenness, METH_VARARGS, "..."},
+    {"FuseNetworks", DemNets_FuseNetworks, METH_VARARGS, "..."},
     {"FlowNetwork", DemNets_FlowNetwork, METH_VARARGS, "..."},
     {"FlowDistance", DemNets_FlowDistance, METH_VARARGS, "..."},
     {"LinkLengths", DemNets_LinkLengths, METH_VARARGS, "..."},
