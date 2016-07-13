@@ -568,9 +568,9 @@ flowdistance(const unsigned int *net,
         while(nbrs && q < plen) {
             cum = malloc(nbrs * sizeof(double));
             l = 0;
-            cum[l++] = lw[net[u]];
+            cum[l++] = lw[net[u]] + 1;
             for(k = net[u] + 1; k < net[u+1]; k++) {
-                cum[l] = cum[l-1] + lw[k];
+                cum[l] = cum[l-1] + lw[k] + 1;
                 l++;
             }
             p = cum[nbrs-1] * drand48();
@@ -813,15 +813,15 @@ gridnetwork(const double *z,
             gn[j] = m;
             h = z[j];
             if(h >= MINELEVATION) {
-                if(z[j - xn] > h)
+                if(z[j - xn] >= h)
                     gn[m++] = j - xn;
-                if(z[j - xn + 1] > h)
+                if(z[j - xn + 1] >= h)
                     gn[m++] = j - xn + 1;
-                if(z[j + 1] > h)
+                if(z[j + 1] >= h)
                     gn[m++] = j + 1;
-                if(z[j + xn] > h)
+                if(z[j + xn] >= h)
                     gn[m++] = j + xn;
-                if(z[j + xn + 1] > h)
+                if(z[j + xn + 1] >= h)
                     gn[m++] = j + xn + 1;
             }
             for(k = 1; k < xn - 1; k++) {
@@ -830,36 +830,36 @@ gridnetwork(const double *z,
                 h = z[j];
                 if(h < MINELEVATION)
                     continue;
-                if(z[j - xn - 1] > h)
+                if(z[j - xn - 1] >= h)
                     gn[m++] = j - xn - 1;
-                if(z[j - xn] > h)
+                if(z[j - xn] >= h)
                     gn[m++] = j - xn;
-                if(z[j - xn + 1] > h)
+                if(z[j - xn + 1] >= h)
                     gn[m++] = j - xn + 1;
-                if(z[j - 1] > h)
+                if(z[j - 1] >= h)
                     gn[m++] = j - 1;
-                if(z[j + 1] > h)
+                if(z[j + 1] >= h)
                     gn[m++] = j + 1;
-                if(z[j + xn - 1] > h)
+                if(z[j + xn - 1] >= h)
                     gn[m++] = j + xn - 1;
-                if(z[j + xn] > h)
+                if(z[j + xn] >= h)
                     gn[m++] = j + xn;
-                if(z[j + xn + 1] > h)
+                if(z[j + xn + 1] >= h)
                     gn[m++] = j + xn + 1;
             }
             j = (i + 1) * xn - 1;
             gn[j] = m;
             h = z[j];
             if(h >= MINELEVATION) {
-                if(z[j - xn - 1] > h)
+                if(z[j - xn - 1] >= h)
                     gn[m++] = j - xn - 1;
-                if(z[j - xn] > h)
+                if(z[j - xn] >= h)
                     gn[m++] = j - xn;
-                if(z[j - 1] > h)
+                if(z[j - 1] >= h)
                     gn[m++] = j - 1;
-                if(z[j + xn - 1] > h)
+                if(z[j + xn - 1] >= h)
                     gn[m++] = j + xn - 1;
-                if(z[j + xn] > h)
+                if(z[j + xn] >= h)
                     gn[m++] = j + xn;
             }
         }
@@ -1080,9 +1080,9 @@ throughput(const unsigned int *net,
         while(nbrs && o < plen) {
             cum = malloc(nbrs * sizeof(double));
             l = 0;
-            cum[l++] = lw[net[u]];
+            cum[l++] = lw[net[u]] + 1;
             for(k = net[u] + 1; k < net[u+1]; k++) {
-                cum[l] = cum[l-1] + lw[k];
+                cum[l] = cum[l-1] + lw[k] + 1;
                 l++;
             }
             p = cum[nbrs-1] * drand48();
@@ -1121,6 +1121,65 @@ throughput(const unsigned int *net,
     }
     free(c);
     return tput;
+}
+
+static PyArrayObject *
+walk(const unsigned int *net,
+     const double *lw,
+     const int start,
+     const unsigned int plen) {
+    PyArrayObject *trace;
+    npy_intp *dim;
+    unsigned int i, k, l, o, u, v;
+    unsigned int n, nbrs;
+    unsigned int *t;
+    double *cum, p;
+
+    if(!initrng())
+        return NULL;
+
+    // alloc numpy array
+    n = net[0] - 1;
+    dim = malloc(sizeof(npy_intp));
+    dim[0] = n;
+    trace = (PyArrayObject *) PyArray_ZEROS(1, dim, PyArray_UINT, 0);
+    free(dim);
+    if(!trace) {
+        PyErr_SetString(PyExc_MemoryError, "...");
+        return NULL;
+    }
+    t = (unsigned int *) trace->data;
+
+    // start random walk at node start
+    if(start < 0)
+        u = (unsigned int)(n * drand48());
+    else
+        u = start;
+    nbrs = net[u+1] - net[u];
+    while(nbrs && o < plen) {
+        cum = malloc(nbrs * sizeof(double));
+        l = 0;
+        cum[l++] = lw[net[u]] + 1;
+        for(k = net[u] + 1; k < net[u+1]; k++) {
+            cum[l] = cum[l-1] + lw[k] + 1;
+            l++;
+        }
+        p = cum[nbrs-1] * drand48();
+        l = 0;
+        for(k = net[u]; k < net[u+1]; k++) {
+            if(p < cum[l++]) {
+                v = net[k];
+                break;
+            }
+        }
+        free(cum);
+        nbrs = net[v+1] - net[v];
+        t[v]++;
+        u = v;
+        o++;
+    }
+    printf("reached node %i after %i steps.\n", u, o);
+    return trace;
 }
 
 static PyObject *
@@ -1554,8 +1613,8 @@ DemNets_Throughput(PyObject *self, PyObject* args) {
     unsigned int *e, iter, plen;
 
     // parse input
-    iter = 100;
-    plen = 10000;
+    iter = 1;
+    plen = 1000000;
     if(!PyArg_ParseTuple(args, "OOO|II", &netarg, &lwarg, &nwarg, &iter, &plen))
         return NULL;
     net = (PyArrayObject *) PyArray_ContiguousFromObject(netarg, PyArray_UINT, 1, 1);
@@ -1588,6 +1647,44 @@ DemNets_Throughput(PyObject *self, PyObject* args) {
     return PyArray_Return(t);
 }
 
+static PyObject *
+DemNets_RandomWalk(PyObject *self, PyObject* args) {
+    PyObject *netarg, *lwarg;
+    PyArrayObject *net, *wlinks, *t;
+    unsigned int *e, plen;
+    int start;
+
+    // parse input
+    start = -1;
+    if(!PyArg_ParseTuple(args, "OO|II", &netarg, &lwarg, &start, &plen))
+        return NULL;
+    net = (PyArrayObject *) PyArray_ContiguousFromObject(netarg, PyArray_UINT, 1, 1);
+    wlinks = (PyArrayObject *) PyArray_ContiguousFromObject(lwarg, PyArray_DOUBLE, 1, 1);
+    if(!net || !wlinks)
+        return NULL;
+
+    // check input
+    e = (unsigned int *) net->data;
+    if(e[e[0] - 1] != net->dimensions[0]) {
+        PyErr_SetString(PyExc_IndexError, "corrupted network format.");
+        return NULL;
+    }
+    if(e[e[0] - 1] != wlinks->dimensions[0]) {
+        PyErr_SetString(PyExc_IndexError, "link-weight array does not match network.");
+        return NULL;
+    }
+    if(start > -1 && start >= e[0] - 1) {
+        PyErr_SetString(PyExc_IndexError, "start position not available.");
+        return NULL;
+    }
+
+    // get random walk trace
+    t = walk(e, (double *)wlinks->data, start, plen);
+
+    Py_DECREF(net);
+    return PyArray_Return(t);
+}
+
 static PyMethodDef DemNets_methods[] = {
     {"Betweenness", DemNets_Betweenness, METH_VARARGS, "..."},
     {"Components", DemNets_Components, METH_VARARGS, "..."},
@@ -1599,6 +1696,7 @@ static PyMethodDef DemNets_methods[] = {
     {"Slopes", DemNets_Slopes, METH_VARARGS, "..."},
     {"LinkSinks", DemNets_LinkSinks, METH_VARARGS, "..."},
     {"LinkSinks_r", DemNets_LinkSinks_r, METH_VARARGS, "..."},
+    {"RandomWalk", DemNets_RandomWalk, METH_VARARGS, "..."},
     {"RemoveLinks", DemNets_RemoveLinks, METH_VARARGS, "..."},
     {"ReverseLinks", DemNets_ReverseLinks, METH_VARARGS, "..."},
     {"Throughput", DemNets_Throughput, METH_VARARGS, "..."},
