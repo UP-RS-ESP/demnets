@@ -6,7 +6,6 @@
 
 #define VERSION "0.1"
 
-#define MAXPATHLEN 100000
 #define MINELEVATION -999
 
 typedef struct Stack Stack;
@@ -537,7 +536,8 @@ static PyArrayObject *
 flowdistance(const unsigned int *net,
              const double *lw,
              const double *ld,
-             const unsigned int iter) {
+             const unsigned int iter,
+             const unsigned int plen) {
     PyArrayObject *dst;
     npy_intp *dim;
     unsigned int i, k, l, u, v;
@@ -565,7 +565,7 @@ flowdistance(const unsigned int *net,
         u = o;
         q = 0;
         nbrs = net[u+1] - net[u];
-        while(nbrs && q < MAXPATHLEN) {
+        while(nbrs && q < plen) {
             cum = malloc(nbrs * sizeof(double));
             l = 0;
             cum[l++] = lw[net[u]];
@@ -743,34 +743,129 @@ gridnetwork(const double *z,
     double h;
 
     n = xn * yn;
-    gn = malloc(n * 5 * sizeof(unsigned int));
+    gn = malloc(n * 9 * sizeof(unsigned int));
     if(!gn) {
         PyErr_SetString(PyExc_MemoryError, "...");
         return NULL;
     }
     m = n + 1;
-    for(i = 0; i < yn; i++) {
-        for(k = 0; k < xn; k++) {
-            j = i * xn + k;
+    for(k = 0; k < xn; k++)
+        gn[k] = m;
+    if(flow) {
+        for(i = 1; i < yn; i++) {
+            j = i * xn;
             gn[j] = m;
             h = z[j];
-            if(h < MINELEVATION)
-                continue;
-            if(j > xn) {
+            if(h >= MINELEVATION) {
                 if(z[j - xn] <= h)
                     gn[m++] = j - xn;
-                if(z[j - 1] <= h)
-                    gn[m++] = j - 1;
-            }
-            if(j < n - xn - 1) {
+                if(z[j - xn + 1] <= h)
+                    gn[m++] = j - xn + 1;
                 if(z[j + 1] <= h)
                     gn[m++] = j + 1;
                 if(z[j + xn] <= h)
                     gn[m++] = j + xn;
+                if(z[j + xn + 1] <= h)
+                    gn[m++] = j + xn + 1;
+            }
+            for(k = 1; k < xn - 1; k++) {
+                j = i * xn + k;
+                gn[j] = m;
+                h = z[j];
+                if(h < MINELEVATION)
+                    continue;
+                if(z[j - xn - 1] <= h)
+                    gn[m++] = j - xn - 1;
+                if(z[j - xn] <= h)
+                    gn[m++] = j - xn;
+                if(z[j - xn + 1] <= h)
+                    gn[m++] = j - xn + 1;
+                if(z[j - 1] <= h)
+                    gn[m++] = j - 1;
+                if(z[j + 1] <= h)
+                    gn[m++] = j + 1;
+                if(z[j + xn - 1] <= h)
+                    gn[m++] = j + xn - 1;
+                if(z[j + xn] <= h)
+                    gn[m++] = j + xn;
+                if(z[j + xn + 1] <= h)
+                    gn[m++] = j + xn + 1;
+            }
+            j = (i + 1) * xn - 1;
+            gn[j] = m;
+            h = z[j];
+            if(h >= MINELEVATION) {
+                if(z[j - xn - 1] <= h)
+                    gn[m++] = j - xn - 1;
+                if(z[j - xn] <= h)
+                    gn[m++] = j - xn;
+                if(z[j - 1] <= h)
+                    gn[m++] = j - 1;
+                if(z[j + xn - 1] <= h)
+                    gn[m++] = j + xn - 1;
+                if(z[j + xn] <= h)
+                    gn[m++] = j + xn;
+            }
+        }
+    } else {
+        for(i = 1; i < yn; i++) {
+            j = i * xn;
+            gn[j] = m;
+            h = z[j];
+            if(h >= MINELEVATION) {
+                if(z[j - xn] > h)
+                    gn[m++] = j - xn;
+                if(z[j - xn + 1] > h)
+                    gn[m++] = j - xn + 1;
+                if(z[j + 1] > h)
+                    gn[m++] = j + 1;
+                if(z[j + xn] > h)
+                    gn[m++] = j + xn;
+                if(z[j + xn + 1] > h)
+                    gn[m++] = j + xn + 1;
+            }
+            for(k = 1; k < xn - 1; k++) {
+                j = i * xn + k;
+                gn[j] = m;
+                h = z[j];
+                if(h < MINELEVATION)
+                    continue;
+                if(z[j - xn - 1] > h)
+                    gn[m++] = j - xn - 1;
+                if(z[j - xn] > h)
+                    gn[m++] = j - xn;
+                if(z[j - xn + 1] > h)
+                    gn[m++] = j - xn + 1;
+                if(z[j - 1] > h)
+                    gn[m++] = j - 1;
+                if(z[j + 1] > h)
+                    gn[m++] = j + 1;
+                if(z[j + xn - 1] > h)
+                    gn[m++] = j + xn - 1;
+                if(z[j + xn] > h)
+                    gn[m++] = j + xn;
+                if(z[j + xn + 1] > h)
+                    gn[m++] = j + xn + 1;
+            }
+            j = (i + 1) * xn - 1;
+            gn[j] = m;
+            h = z[j];
+            if(h >= MINELEVATION) {
+                if(z[j - xn - 1] > h)
+                    gn[m++] = j - xn - 1;
+                if(z[j - xn] > h)
+                    gn[m++] = j - xn;
+                if(z[j - 1] > h)
+                    gn[m++] = j - 1;
+                if(z[j + xn - 1] > h)
+                    gn[m++] = j + xn - 1;
+                if(z[j + xn] > h)
+                    gn[m++] = j + xn;
             }
         }
     }
-    gn[n] = m;
+    for(k = n - xn; k <= n; k++)
+        gn[k] = m;
 
     // alloc numpy array
     dim = malloc(sizeof(npy_intp));
@@ -954,7 +1049,8 @@ static PyArrayObject *
 throughput(const unsigned int *net,
            const double *lw,
            const double *nw,
-           const unsigned int iter) {
+           const unsigned int iter,
+           const unsigned int plen) {
     PyArrayObject *tput;
     npy_intp *dim;
     unsigned int i, k, l, u, v, o;
@@ -981,7 +1077,7 @@ throughput(const unsigned int *net,
         u = i % n;
         o = 0;
         nbrs = net[u+1] - net[u];
-        while(nbrs && o < MAXPATHLEN) {
+        while(nbrs && o < plen) {
             cum = malloc(nbrs * sizeof(double));
             l = 0;
             cum[l++] = lw[net[u]];
@@ -1180,11 +1276,12 @@ static PyObject *
 DemNets_FlowDistance(PyObject *self, PyObject* args) {
     PyObject *netarg, *lwarg, *ldarg;
     PyArrayObject *wlinks, *dlinks, *net, *d;
-    unsigned int *e, iter;
+    unsigned int *e, iter, plen;
 
     // parse input
     iter = 100;
-    if(!PyArg_ParseTuple(args, "OOO|I", &netarg, &lwarg, &ldarg, &iter))
+    plen = 1000;
+    if(!PyArg_ParseTuple(args, "OOO|II", &netarg, &lwarg, &ldarg, &iter, &plen))
         return NULL;
     net = (PyArrayObject *) PyArray_ContiguousFromObject(netarg, PyArray_UINT, 1, 1);
     wlinks = (PyArrayObject *) PyArray_ContiguousFromObject(lwarg, PyArray_DOUBLE, 1, 1);
@@ -1208,7 +1305,7 @@ DemNets_FlowDistance(PyObject *self, PyObject* args) {
     }
 
     // get nodes average flow distance (path lengths from source to current node)
-    d = flowdistance(e, (double *)wlinks->data, (double *)dlinks->data, iter);
+    d = flowdistance(e, (double *)wlinks->data, (double *)dlinks->data, iter, plen);
 
     Py_DECREF(net);
     Py_DECREF(wlinks);
@@ -1253,7 +1350,7 @@ DemNets_FlowNetworkFromGrid(PyObject *self, PyObject* args) {
         return NULL;
 
     // retrieve flow network from elevation grid
-    net = gridnetwork((double *)ele->data, ele->dimensions[0], ele->dimensions[1], flow);
+    net = gridnetwork((double *)ele->data, ele->dimensions[1], ele->dimensions[0], flow);
     Py_DECREF(ele);
     return PyArray_Return(net);
 }
@@ -1454,11 +1551,12 @@ static PyObject *
 DemNets_Throughput(PyObject *self, PyObject* args) {
     PyObject *netarg, *lwarg, *nwarg;
     PyArrayObject *wlinks, *wnodes, *net, *t;
-    unsigned int *e, iter;
+    unsigned int *e, iter, plen;
 
     // parse input
     iter = 100;
-    if(!PyArg_ParseTuple(args, "OOO|I", &netarg, &lwarg, &nwarg, &iter))
+    plen = 10000;
+    if(!PyArg_ParseTuple(args, "OOO|II", &netarg, &lwarg, &nwarg, &iter, &plen))
         return NULL;
     net = (PyArrayObject *) PyArray_ContiguousFromObject(netarg, PyArray_UINT, 1, 1);
     wlinks = (PyArrayObject *) PyArray_ContiguousFromObject(lwarg, PyArray_DOUBLE, 1, 1);
@@ -1482,7 +1580,7 @@ DemNets_Throughput(PyObject *self, PyObject* args) {
     }
 
     // get node throughput
-    t = throughput(e, (double *)wlinks->data, (double *)wnodes->data, iter);
+    t = throughput(e, (double *)wlinks->data, (double *)wnodes->data, iter, plen);
 
     Py_DECREF(net);
     Py_DECREF(wlinks);
