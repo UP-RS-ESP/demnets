@@ -1071,7 +1071,7 @@ throughput(const unsigned int *net,
         return NULL;
     }
 
-#pragma omp parallel for private(i,k,l,o,u,v,p,cum,oset,nbrs)
+#pragma omp parallel for private(i,k,l,o,u,v,p,cum,oset,nbrs) schedule(guided)
     for(i = 0; i < n * iter; i++) {
         oset = n * omp_get_thread_num();
         u = i % n;
