@@ -269,6 +269,55 @@ components(const unsigned int *net,
 }
 
 static PyArrayObject *
+sinkdistance(const unsigned int *net,
+             const unsigned int sink) {
+    PyArrayObject *dist;
+    npy_intp *dim;
+    unsigned int i, k, l;
+    unsigned int *seen, *d, di;
+    Queue *que;
+
+    // alloc numpy array
+    dim = malloc(sizeof(npy_intp));
+    dim[0] = net[0] - 1;
+    dist = (PyArrayObject *) PyArray_ZEROS(1, dim, PyArray_UINT, 0);
+    free(dim);
+    if(!dist) {
+        PyErr_SetString(PyExc_MemoryError, "...");
+        return NULL;
+    }
+    d = (unsigned int *) dist->data;
+
+    que = malloc(sizeof(Queue));
+    que->first = que->last = NULL;
+    seen = calloc(net[0] - 1, sizeof(unsigned int));
+    if(!seen) {
+        PyErr_SetString(PyExc_MemoryError, "...");
+        exit(EXIT_FAILURE);
+    }
+    // put sink into queue
+    if(put(que, sink, 0)) {
+        PyErr_SetString(PyExc_MemoryError, "failed to fill queue ..");
+        exit(EXIT_FAILURE);
+    }
+    seen[sink] = 1;
+    while(!get(que, &i, &di)) {
+        d[i] = di;
+        // all neighbors l of i
+        for(k = net[i]; k < net[i+1]; k++) {
+            l = net[k];
+            if(!seen[l]) {
+                seen[l]++;
+                put(que, l, di+1);
+            }
+        }
+    }
+    free(seen);
+    free(que);
+    return dist;
+}
+
+static PyArrayObject *
 linklengths(const double *x,
             const double *y,
             const double *z,
@@ -1685,6 +1734,37 @@ DemNets_RandomWalk(PyObject *self, PyObject* args) {
     return PyArray_Return(t);
 }
 
+static PyObject *
+DemNets_SinkDistance(PyObject *self, PyObject* args) {
+    PyObject *netarg;
+    PyArrayObject *net, *d;
+    unsigned int *e, sink;
+
+    // parse input
+    if(!PyArg_ParseTuple(args, "OI", &netarg, &sink))
+        return NULL;
+    net = (PyArrayObject *) PyArray_ContiguousFromObject(netarg, PyArray_UINT, 1, 1);
+    if(!net)
+        return NULL;
+
+    // check input
+    e = (unsigned int *) net->data;
+    if(e[e[0] - 1] != net->dimensions[0]) {
+        PyErr_SetString(PyExc_IndexError, "corrupted network format.");
+        return NULL;
+    }
+    if(sink >= e[0] - 1) {
+        PyErr_SetString(PyExc_IndexError, "sink node not available.");
+        return NULL;
+    }
+
+    // get upstream distances from sink node
+    d = sinkdistance(e, sink);
+
+    Py_DECREF(net);
+    return PyArray_Return(d);
+}
+
 static PyMethodDef DemNets_methods[] = {
     {"Betweenness", DemNets_Betweenness, METH_VARARGS, "..."},
     {"Components", DemNets_Components, METH_VARARGS, "..."},
@@ -1694,6 +1774,7 @@ static PyMethodDef DemNets_methods[] = {
     {"FlowDistance", DemNets_FlowDistance, METH_VARARGS, "..."},
     {"LinkLengths", DemNets_LinkLengths, METH_VARARGS, "..."},
     {"Slopes", DemNets_Slopes, METH_VARARGS, "..."},
+    {"SinkDistance", DemNets_SinkDistance, METH_VARARGS, "..."},
     {"LinkSinks", DemNets_LinkSinks, METH_VARARGS, "..."},
     {"LinkSinks_r", DemNets_LinkSinks_r, METH_VARARGS, "..."},
     {"RandomWalk", DemNets_RandomWalk, METH_VARARGS, "..."},
