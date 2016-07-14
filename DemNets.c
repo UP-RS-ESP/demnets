@@ -1035,7 +1035,7 @@ static PyArrayObject *
 reverselinks(const unsigned int *net) {
     PyArrayObject *new;
     npy_intp *dim;
-    unsigned int i, k, n;
+    unsigned int i, n;
     unsigned int *w;
 
     n = net[0] - 1;
@@ -1120,6 +1120,7 @@ throughput(const unsigned int *net,
         return NULL;
     }
 
+    v = 0;
 #pragma omp parallel for private(i,k,l,o,u,v,p,cum,oset,nbrs) schedule(guided)
     for(i = 0; i < n * iter; i++) {
         oset = n * omp_get_thread_num();
@@ -1179,7 +1180,7 @@ walk(const unsigned int *net,
      const unsigned int plen) {
     PyArrayObject *trace;
     npy_intp *dim;
-    unsigned int i, k, l, o, u, v;
+    unsigned int k, l, o, u, v;
     unsigned int n, nbrs;
     unsigned int *t;
     double *cum, p;
@@ -1205,6 +1206,7 @@ walk(const unsigned int *net,
     else
         u = start;
     nbrs = net[u+1] - net[u];
+    o = 0;
     while(nbrs && o < plen) {
         cum = malloc(nbrs * sizeof(double));
         l = 0;
@@ -1349,7 +1351,7 @@ static PyObject *
 DemNets_FuseNetworks(PyObject *self, PyObject* args) {
     PyObject *a, *b;
     PyArrayObject *u, *v, *w;
-    unsigned int *x, *y, n;
+    unsigned int *x, *y;
 
     // parse input
     if(!PyArg_ParseTuple(args, "OO", &a, &b))
