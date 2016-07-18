@@ -1181,11 +1181,12 @@ derivatives(const unsigned int *net,
            const unsigned int plen) {
     PyArrayObject *velo, *accl;
     npy_intp *dim;
-    unsigned int i, k, l, o, r, x, y;
+    unsigned int i, k, l, o;
+    unsigned int w, u, t, s, r, x, y;
     unsigned int n, m, oset, nbrs;
     unsigned long *c;
     double *v, *a, *ve, *ac;
-    double *cum, *t, p;
+    double *cum, p;
 
     if(!initrng())
         return NULL;
@@ -1202,8 +1203,9 @@ derivatives(const unsigned int *net,
         return NULL;
     }
 
-#pragma omp parallel for private(i,k,l,o,r,x,y,p,cum,oset,nbrs) schedule(guided)
+#pragma omp parallel for private(i,k,l,o,w,u,t,s,r,x,y,p,cum,oset,nbrs) schedule(guided)
     for(i = 0; i < n * iter; i++) {
+        s = t = u = w = n + 1;
         x = y = o = l = 0;
         oset = n * omp_get_thread_num();
         r = i % n;
@@ -1246,7 +1248,13 @@ derivatives(const unsigned int *net,
             nbrs = net[y+1] - net[y];
             c[x + oset] += 1;
             v[x + oset] += z[r] - z[y];
-            a[x + oset] += z[y] + z[r] - z[x]*2;
+            //a[x + oset] += z[y] + z[r] - z[x]*2;
+            if(w < n)
+                a[s + oset] += z[y]+z[w]+2*(z[x]+z[u])-z[r]-z[t]-4*z[s];
+            w = u;
+            u = t;
+            t = s;
+            s = r;
             r = x;
             x = y;
             o++;
@@ -1285,7 +1293,7 @@ derivatives(const unsigned int *net,
     // average over all paths
     for(k = 0; k < n; k++) {
         ve[k] /= c[k] * 2.0;
-        ac[k] /= c[k];
+        ac[k] /= c[k] * 16.;
     }
     free(c);
 	return Py_BuildValue("(OO)", velo, accl);
