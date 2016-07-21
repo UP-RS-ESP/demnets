@@ -1299,16 +1299,16 @@ derivatives(const unsigned int *net,
 	return Py_BuildValue("(OO)", velo, accl);
 }
 
-static PyArrayObject *
+static PyObject *
 walk(const unsigned int *net,
      const double *lw,
      const int start,
      const unsigned int plen) {
-    PyArrayObject *trace;
+    PyArrayObject *trace, *tracei;
     npy_intp *dim;
-    unsigned int k, l, o, u, v;
+    unsigned int i, k, l, o, u, v;
     unsigned int n, nbrs;
-    unsigned int *t;
+    unsigned int *t, *ti, tlen;
     double *cum, p;
 
     if(!initrng())
@@ -1320,8 +1320,10 @@ walk(const unsigned int *net,
     dim[0] = n;
     trace = (PyArrayObject *) PyArray_ZEROS(1, dim, PyArray_UINT, 0);
     free(dim);
-    if(!trace) {
-        PyErr_SetString(PyExc_MemoryError, "...");
+    tlen = 1024;
+    ti = malloc(tlen * sizeof(unsigned int));
+    if(!trace || !ti) {
+        PyErr_SetString(PyExc_MemoryError, "trace");
         return NULL;
     }
     t = (unsigned int *) trace->data;
@@ -1352,11 +1354,33 @@ walk(const unsigned int *net,
         free(cum);
         nbrs = net[v+1] - net[v];
         t[v]++;
+        ti[i++] = v;
+        if(i >= tlen) {
+            tlen += 1024;
+            ti = realloc(ti, tlen * sizeof(unsigned int));
+            if(!ti) {
+                PyErr_SetString(PyExc_MemoryError, "trace to long");
+                return NULL;
+            }
+        }
         u = v;
         o++;
     }
-    printf("reached node %i after %i steps.\n", u, o);
-    return trace;
+    tlen = i;
+    ti = realloc(ti, tlen * sizeof(unsigned int));
+
+    // alloc numpy array
+    dim = malloc(sizeof(npy_intp));
+    dim[0] = tlen;
+    tracei = (PyArrayObject *) PyArray_ZEROS(1, dim, PyArray_UINT, 0);
+    free(dim);
+    if(!tracei) {
+        PyErr_SetString(PyExc_MemoryError, "...");
+        return NULL;
+    }
+    memcpy(tracei->data, ti, tlen * sizeof(unsigned int));
+    free(ti);
+    return Py_BuildValue("(OO)", trace, tracei);
 }
 
 static PyObject *
@@ -1867,8 +1891,8 @@ DemNets_Derivatives(PyObject *self, PyObject* args) {
 
 static PyObject *
 DemNets_RandomWalk(PyObject *self, PyObject* args) {
-    PyObject *netarg, *lwarg;
-    PyArrayObject *net, *wlinks, *t;
+    PyObject *netarg, *lwarg, *trace;
+    PyArrayObject *net, *wlinks;
     unsigned int *e, plen;
     int start;
 
@@ -1897,10 +1921,11 @@ DemNets_RandomWalk(PyObject *self, PyObject* args) {
     }
 
     // get random walk trace
-    t = walk(e, (double *)wlinks->data, start, plen);
+    trace = walk(e, (double *)wlinks->data, start, plen);
 
     Py_DECREF(net);
-    return PyArray_Return(t);
+    Py_DECREF(wlinks);
+    return trace;
 }
 
 static PyObject *
