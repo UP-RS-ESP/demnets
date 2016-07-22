@@ -1383,6 +1383,120 @@ walk(const unsigned int *net,
     return Py_BuildValue("(OO)", trace, tracei);
 }
 
+static PyArrayObject *
+walks(const unsigned int *net,
+      const double *lw,
+      const unsigned int dst,
+      const unsigned int *src,
+      const unsigned int nsrc,
+      const unsigned int iter,
+      const unsigned int plen) {
+    PyArrayObject *traces;
+    npy_intp *dim;
+    unsigned int i, j, k, l, o, u, v;
+    unsigned int h, hh, n, nbrs;
+    unsigned int *t, *tail, *head;
+    unsigned int tlen, tllen;
+    double *cum, p;
+
+    if(!initrng())
+        return NULL;
+
+    tllen = 2048;
+    n = iter * nsrc;
+    head = malloc((1+n) * sizeof(unsigned int));
+    tail = malloc(tllen * sizeof(unsigned int));
+    if(!head || !tail) {
+        PyErr_SetString(PyExc_MemoryError, "...");
+        return NULL;
+    }
+    h = 0;
+    head[h] = 0;
+#pragma omp parallel for private(i,j,k,l,o,p,t,u,v,tlen,nbrs,cum) schedule(guided)
+    for(i = 0; i < iter * nsrc; i++) {
+        tlen = 1024;
+        t = malloc(tlen * sizeof(unsigned int));
+        if(!t) {
+            PyErr_SetString(PyExc_MemoryError, "cannot start a new trace");
+            exit(EXIT_FAILURE);
+        }
+        u = src[i % nsrc];
+        j = 0;
+        t[j++] = u;
+        nbrs = net[u+1] - net[u];
+        o = 0;
+        while(nbrs && o < plen) {
+            cum = malloc(nbrs * sizeof(double));
+            l = 0;
+            cum[l++] = lw[net[u]] + 1;
+            for(k = net[u] + 1; k < net[u+1]; k++) {
+                cum[l] = cum[l-1] + lw[k] + 1;
+                l++;
+            }
+            p = cum[nbrs-1] * drand48();
+            l = 0;
+            for(k = net[u]; k < net[u+1]; k++) {
+                if(p < cum[l++]) {
+                    v = net[k];
+                    break;
+                }
+            }
+            free(cum);
+            nbrs = net[v+1] - net[v];
+            t[j++] = v;
+            if(j >= tlen) {
+                tlen += 1024;
+                t = realloc(t, tlen * sizeof(unsigned int));
+                if(!t) {
+                    PyErr_SetString(PyExc_MemoryError, "trace to long");
+                    exit(EXIT_FAILURE);
+                }
+            }
+            if(v == dst) {
+                tlen = j;
+#pragma omp critical
+{
+                hh = head[h++];
+                head[h] = hh + tlen;
+                if(tllen <= head[h]) {
+                    tllen = head[h] + tlen;
+                    tail = realloc(tail, tllen * sizeof(unsigned int));
+                    if(!tail) {
+                        PyErr_SetString(PyExc_MemoryError, "cannot store more traces");
+                        exit(EXIT_FAILURE);
+                    }
+                }
+                for(j = 0; j < tlen; j++)
+                    tail[j + hh] = t[j];
+}
+                free(t);
+                break;
+            }
+            u = v;
+            o++;
+        }
+    }
+
+    // alloc numpy array
+    dim = malloc(sizeof(npy_intp));
+    dim[0] = 1 + h + head[h];
+    traces = (PyArrayObject *) PyArray_ZEROS(1, dim, PyArray_UINT, 0);
+    free(dim);
+    if(!traces) {
+        PyErr_SetString(PyExc_MemoryError, "not enough memory for the numpy array");
+        return NULL;
+    }
+    t = (unsigned int *)traces->data;
+    for(i = 0; i <= h; i++)
+        t[i] = head[i] + h + 1;
+    for(i = 0; i < head[h]; i++)
+        t[i+h+1] = tail[i];
+    free(head);
+    free(tail);
+
+    return traces;
+}
+
 static PyObject *
 DemNets_Betweenness(PyObject *self, PyObject* args) {
     PyObject *netarg, *lwarg, *nwarg;
@@ -1897,6 +2011,7 @@ DemNets_RandomWalk(PyObject *self, PyObject* args) {
     int start;
 
     // parse input
+    plen = 1000000;
     start = -1;
     if(!PyArg_ParseTuple(args, "OO|II", &netarg, &lwarg, &start, &plen))
         return NULL;
@@ -1926,6 +2041,47 @@ DemNets_RandomWalk(PyObject *self, PyObject* args) {
     Py_DECREF(net);
     Py_DECREF(wlinks);
     return trace;
+}
+
+static PyObject *
+DemNets_RandomWalks(PyObject *self, PyObject* args) {
+    PyObject *netarg, *lwarg, *srcarg;
+    PyArrayObject *net, *wlinks, *src, *traces;
+    unsigned int *e, dst, iter, plen;
+
+    // parse input
+    iter = 1;
+    plen = 1000000;
+    if(!PyArg_ParseTuple(args, "OOOI|II", &netarg, &lwarg, &srcarg, &dst, &iter, &plen))
+        return NULL;
+    net = (PyArrayObject *) PyArray_ContiguousFromObject(netarg, PyArray_UINT, 1, 1);
+    wlinks = (PyArrayObject *) PyArray_ContiguousFromObject(lwarg, PyArray_DOUBLE, 1, 1);
+    src = (PyArrayObject *) PyArray_ContiguousFromObject(srcarg, PyArray_UINT, 1, 1);
+    if(!net || !wlinks || !src)
+        return NULL;
+
+    // check input
+    e = (unsigned int *) net->data;
+    if(e[e[0] - 1] != net->dimensions[0]) {
+        PyErr_SetString(PyExc_IndexError, "corrupted network format.");
+        return NULL;
+    }
+    if(e[e[0] - 1] != wlinks->dimensions[0]) {
+        PyErr_SetString(PyExc_IndexError, "link-weight array does not match network.");
+        return NULL;
+    }
+    if(dst > -1 && dst >= e[0] - 1) {
+        PyErr_SetString(PyExc_IndexError, "destination not available.");
+        return NULL;
+    }
+
+    // get random walk traces
+    traces = walks(e, (double *)wlinks->data, dst, (unsigned int *)src->data, src->dimensions[0], iter, plen);
+
+    Py_DECREF(net);
+    Py_DECREF(src);
+    Py_DECREF(wlinks);
+    return PyArray_Return(traces);
 }
 
 static PyObject *
@@ -1973,6 +2129,7 @@ static PyMethodDef DemNets_methods[] = {
     {"LinkSinks", DemNets_LinkSinks, METH_VARARGS, "..."},
     {"LinkSinks_r", DemNets_LinkSinks_r, METH_VARARGS, "..."},
     {"RandomWalk", DemNets_RandomWalk, METH_VARARGS, "..."},
+    {"RandomWalks", DemNets_RandomWalks, METH_VARARGS, "..."},
     {"RemoveLinks", DemNets_RemoveLinks, METH_VARARGS, "..."},
     {"ReverseLinks", DemNets_ReverseLinks, METH_VARARGS, "..."},
     {"Throughput", DemNets_Throughput, METH_VARARGS, "..."},
