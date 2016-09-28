@@ -7,6 +7,7 @@
 #define VERSION "0.1"
 
 #define MINELEVATION -999
+#define MAXPATHLEN 1000000
 
 typedef struct Stack Stack;
 typedef struct Queue Queue;
@@ -1173,6 +1174,156 @@ throughput(const unsigned int *net,
     return tput;
 }
 
+static PyArrayObject *
+pathlengths(const unsigned int *net,
+           const double *lw,
+           const unsigned int iter,
+           const unsigned int plen) {
+    PyArrayObject *lens;
+    npy_intp *dim;
+    unsigned int i, k, l, u, v, o;
+    unsigned int n, m, oset, nbrs;
+    unsigned long *c;
+    double *cum, *pl, p;
+
+    if(!initrng())
+        return NULL;
+
+    n = net[0] - 1;
+#pragma omp parallel
+    m = omp_get_num_threads();
+
+    c = calloc(n * m, sizeof(unsigned long));
+    if(!c) {
+        PyErr_SetString(PyExc_MemoryError, "...");
+        return NULL;
+    }
+
+#pragma omp parallel for private(i,k,l,o,u,v,p,cum,oset,nbrs) schedule(guided)
+    for(i = 0; i < n * iter; i++) {
+        oset = n * omp_get_thread_num();
+        u = i % n;
+        v = u;
+        o = 0;
+        nbrs = net[u+1] - net[u];
+        while(nbrs && o < plen) {
+            c[v + oset] += 1;
+            cum = malloc(nbrs * sizeof(double));
+            l = 0;
+            cum[l++] = lw[net[u]] + 1;
+            for(k = net[u] + 1; k < net[u+1]; k++) {
+                cum[l] = cum[l-1] + lw[k] + 1;
+                l++;
+            }
+            p = cum[nbrs-1] * drand48();
+            l = 0;
+            for(k = net[u]; k < net[u+1]; k++) {
+                if(p < cum[l++]) {
+                    u = net[k];
+                    break;
+                }
+            }
+            free(cum);
+            nbrs = net[u+1] - net[u];
+            o++;
+        }
+    }
+    /* end parallel for */
+
+    // alloc numpy array
+    dim = malloc(sizeof(npy_intp));
+    dim[0] = n;
+    lens = (PyArrayObject *) PyArray_ZEROS(1, dim, PyArray_DOUBLE, 0);
+    free(dim);
+    if(!lens) {
+        PyErr_SetString(PyExc_MemoryError, "...");
+        return NULL;
+    }
+    pl = (double *) lens->data;
+
+    /* reduction of threaded array into numpy */
+    for(i = 0; i < m; i++) {
+        oset = i * n;
+        for(k = 0; k < n; k++)
+            pl[k] += (double)c[k + oset] / iter;
+    }
+    free(c);
+    return lens;
+}
+
+static PyArrayObject *
+revisits(const unsigned int *net,
+           const double *lw,
+           const unsigned int iter,
+           const unsigned int plen) {
+    PyArrayObject *revisits;
+    npy_intp *dim;
+    unsigned int i, k, l, u, o;
+    unsigned int n, m, oset, nbrs;
+    unsigned int *c, *r;
+    double *cum, p;
+
+    if(!initrng())
+        return NULL;
+
+    n = net[0] - 1;
+    
+    // alloc numpy array
+    dim = malloc(sizeof(npy_intp));
+    dim[0] = n;
+    revisits = (PyArrayObject *) PyArray_ZEROS(1, dim, PyArray_UINT, 0);
+    free(dim);
+    if(!revisits) {
+        PyErr_SetString(PyExc_MemoryError, "...");
+        return NULL;
+    }
+    r = (unsigned int *) revisits->data;
+
+#pragma omp parallel for private(i,k,l,o,u,p,cum,oset,nbrs,c) schedule(guided)
+    for(i = 0; i < n * iter; i++) {
+        c = calloc(n, sizeof(unsigned int));
+        if(!c) {
+            PyErr_SetString(PyExc_MemoryError, "...");
+            exit(EXIT_FAILURE);
+        }
+        oset = n * omp_get_thread_num();
+        u = i % n;
+        o = 0;
+        nbrs = net[u+1] - net[u];
+        while(nbrs && o < plen) {
+            c[u]++;
+            cum = malloc(nbrs * sizeof(double));
+            l = 0;
+            cum[l++] = lw[net[u]] + 1;
+            for(k = net[u] + 1; k < net[u+1]; k++) {
+                cum[l] = cum[l-1] + lw[k] + 1;
+                l++;
+            }
+            p = cum[nbrs-1] * drand48();
+            l = 0;
+            for(k = net[u]; k < net[u+1]; k++) {
+                if(p < cum[l++]) {
+                    u = net[k];
+                    break;
+                }
+            }
+            free(cum);
+            nbrs = net[u+1] - net[u];
+            o++;
+        }
+        for(k = 0; k < n; k++) {
+            if(c[k] > 1) {
+#pragma omp critical
+                r[k] += c[k];
+            }
+        }
+        free(c);
+    }
+    /* end parallel for */
+
+    return revisits;
+}
+
 static PyObject *
 derivatives(const unsigned int *net,
            const double *lw,
@@ -1482,7 +1633,8 @@ hillslopelengths(const unsigned int *net,
       const double zthr,
       const unsigned int *src,
       const unsigned int nsrc,
-      const unsigned int iter) {
+      const unsigned int iter,
+      const unsigned int plen) {
     PyArrayObject *lengths;
     npy_intp *dim;
     unsigned long *c;
@@ -1493,7 +1645,7 @@ hillslopelengths(const unsigned int *net,
         return NULL;
 
     n = net[0] - 1;
-#pragma omp parallel
+//#pragma omp parallel
     m = omp_get_num_threads();
 
     c = calloc(n * m, sizeof(unsigned long));
@@ -1502,12 +1654,12 @@ hillslopelengths(const unsigned int *net,
         return NULL;
     }
 
-#pragma omp parallel for private(i,x,o,l,k,nbrs,cum,p) schedule(guided)
+//#pragma omp parallel for private(i,x,o,l,k,nbrs,cum,p) schedule(guided)
     for(i = 0; i < iter * nsrc; i++) {
         x = src[i % nsrc];
         o = x + n * omp_get_thread_num();
         nbrs = net[x+1] - net[x];
-        while(nbrs && z[x] <= zthr) {
+        while(nbrs && z[x] <= zthr && c[o] < plen) {
             c[o]++;
             cum = malloc(nbrs * sizeof(double));
             l = 0;
@@ -1541,7 +1693,7 @@ hillslopelengths(const unsigned int *net,
     h = (double *)lengths->data;
     for(i = 0; i < m; i++) {
         oset = i * n;
-        for(k = 0; k < net[0] - 1; k++)
+        for(k = 0; k < n; k++)
             h[k] += c[k + oset] / (double)iter;
     }
     return lengths;
@@ -1704,7 +1856,7 @@ DemNets_FlowDistance(PyObject *self, PyObject* args) {
 
     // parse input
     iter = 100;
-    plen = 1000;
+    plen = MAXPATHLEN;
     if(!PyArg_ParseTuple(args, "OOO|II", &netarg, &lwarg, &ldarg, &iter, &plen))
         return NULL;
     net = (PyArrayObject *) PyArray_ContiguousFromObject(netarg, PyArray_UINT, 1, 1);
@@ -1979,7 +2131,7 @@ DemNets_Throughput(PyObject *self, PyObject* args) {
 
     // parse input
     iter = 1;
-    plen = 1000000;
+    plen = MAXPATHLEN;
     if(!PyArg_ParseTuple(args, "OOO|II", &netarg, &lwarg, &nwarg, &iter, &plen))
         return NULL;
     net = (PyArrayObject *) PyArray_ContiguousFromObject(netarg, PyArray_UINT, 1, 1);
@@ -2010,6 +2162,76 @@ DemNets_Throughput(PyObject *self, PyObject* args) {
     Py_DECREF(wlinks);
     Py_DECREF(wnodes);
     return PyArray_Return(t);
+}
+
+static PyObject *
+DemNets_AveragePathLengths(PyObject *self, PyObject* args) {
+    PyObject *netarg, *lwarg, *nwarg;
+    PyArrayObject *wlinks, *net, *lens;
+    unsigned int *e, iter, plen;
+
+    // parse input
+    iter = 100;
+    plen = MAXPATHLEN;
+    if(!PyArg_ParseTuple(args, "OO|II", &netarg, &lwarg, &iter, &plen))
+        return NULL;
+    net = (PyArrayObject *) PyArray_ContiguousFromObject(netarg, PyArray_UINT, 1, 1);
+    wlinks = (PyArrayObject *) PyArray_ContiguousFromObject(lwarg, PyArray_DOUBLE, 1, 1);
+    if(!net || !wlinks)
+        return NULL;
+
+    // check input
+    e = (unsigned int *) net->data;
+    if(e[e[0] - 1] != net->dimensions[0]) {
+        PyErr_SetString(PyExc_IndexError, "corrupted network format.");
+        return NULL;
+    }
+    if(e[e[0] - 1] != wlinks->dimensions[0]) {
+        PyErr_SetString(PyExc_IndexError, "link-weight array does not match network.");
+        return NULL;
+    }
+
+    // get node's average path length
+    lens = pathlengths(e, (double *)wlinks->data, iter, plen);
+
+    Py_DECREF(net);
+    Py_DECREF(wlinks);
+    return PyArray_Return(lens);
+}
+
+static PyObject *
+DemNets_Revisits(PyObject *self, PyObject* args) {
+    PyObject *netarg, *lwarg, *nwarg;
+    PyArrayObject *wlinks, *net, *r;
+    unsigned int *e, iter, plen;
+
+    // parse input
+    iter = 1;
+    plen = MAXPATHLEN;
+    if(!PyArg_ParseTuple(args, "OO|II", &netarg, &lwarg, &iter, &plen))
+        return NULL;
+    net = (PyArrayObject *) PyArray_ContiguousFromObject(netarg, PyArray_UINT, 1, 1);
+    wlinks = (PyArrayObject *) PyArray_ContiguousFromObject(lwarg, PyArray_DOUBLE, 1, 1);
+    if(!net || !wlinks)
+        return NULL;
+
+    // check input
+    e = (unsigned int *) net->data;
+    if(e[e[0] - 1] != net->dimensions[0]) {
+        PyErr_SetString(PyExc_IndexError, "corrupted network format.");
+        return NULL;
+    }
+    if(e[e[0] - 1] != wlinks->dimensions[0]) {
+        PyErr_SetString(PyExc_IndexError, "link-weight array does not match network.");
+        return NULL;
+    }
+
+    // get node's average path length
+    r = revisits(e, (double *)wlinks->data, iter, plen);
+
+    Py_DECREF(net);
+    Py_DECREF(wlinks);
+    return PyArray_Return(r);
 }
 
 static PyObject *
@@ -2060,7 +2282,7 @@ DemNets_RandomWalk(PyObject *self, PyObject* args) {
     int start;
 
     // parse input
-    plen = 1000000;
+    plen = MAXPATHLEN;
     start = -1;
     if(!PyArg_ParseTuple(args, "OO|I", &netarg, &lwarg, &start))//, &plen))
         return NULL;
@@ -2100,7 +2322,7 @@ DemNets_RandomWalks(PyObject *self, PyObject* args) {
 
     // parse input
     iter = 1;
-    plen = 1000000;
+    plen = MAXPATHLEN;
     if(!PyArg_ParseTuple(args, "OOOI|II", &netarg, &lwarg, &srcarg, &dst, &iter, &plen))
         return NULL;
     net = (PyArrayObject *) PyArray_ContiguousFromObject(netarg, PyArray_UINT, 1, 1);
@@ -2138,10 +2360,11 @@ DemNets_HillSlopeLengths(PyObject *self, PyObject* args) {
     PyObject *netarg, *lwarg, *zarg, *srcarg;
     PyArrayObject *net, *wlinks, *src, *z, *lengths;
     double zthr;
-    unsigned int *e, iter;
+    unsigned int *e, iter, plen;
 
     // parse input
     iter = 100;
+    plen = MAXPATHLEN;
     if(!PyArg_ParseTuple(args, "OOOdO|I", &netarg, &lwarg, &zarg, &zthr, &srcarg, &iter))
         return NULL;
     net = (PyArrayObject *) PyArray_ContiguousFromObject(netarg, PyArray_UINT, 1, 1);
@@ -2162,7 +2385,7 @@ DemNets_HillSlopeLengths(PyObject *self, PyObject* args) {
         return NULL;
     }
 
-    lengths = hillslopelengths(e, (double *)wlinks->data, (double *)z->data, zthr, (unsigned int *)src->data, src->dimensions[0], iter);
+    lengths = hillslopelengths(e, (double *)wlinks->data, (double *)z->data, zthr, (unsigned int *)src->data, src->dimensions[0], iter, plen);
 
     Py_DECREF(z);
     Py_DECREF(net);
@@ -2220,6 +2443,8 @@ static PyMethodDef DemNets_methods[] = {
     {"RandomWalks", DemNets_RandomWalks, METH_VARARGS, "..."},
     {"RemoveLinks", DemNets_RemoveLinks, METH_VARARGS, "..."},
     {"ReverseLinks", DemNets_ReverseLinks, METH_VARARGS, "..."},
+    {"Revisits", DemNets_Revisits, METH_VARARGS, "..."},
+    {"AveragePathLengths", DemNets_AveragePathLengths, METH_VARARGS, "..."},
     {"Throughput", DemNets_Throughput, METH_VARARGS, "..."},
     {NULL, NULL, 0, NULL}
 };
