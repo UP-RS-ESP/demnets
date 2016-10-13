@@ -7,7 +7,7 @@
 #define VERSION "0.1"
 
 #define MINELEVATION -999
-#define MAXPATHLEN 1000000
+#define MAXPATHLEN 10000000
 
 typedef struct Stack Stack;
 typedef struct Queue Queue;
@@ -333,7 +333,7 @@ linklengths(const double *x,
     // alloc numpy array
     n = net[0] - 1;
     dim = malloc(sizeof(npy_intp));
-    dim[0] = net[n];
+    dim[0] = net[n] - n - 1;
     lln = (PyArrayObject *) PyArray_ZEROS(1, dim, PyArray_DOUBLE, 0);
     free(dim);
     if(!lln) {
@@ -344,7 +344,6 @@ linklengths(const double *x,
 
     // estimate 2-norm link distances i->j
     for(i = 0; i < n; i++) {
-        l[i] = net[i];
         xi = x[i];
         yi = y[i];
         zi = z[i];
@@ -353,10 +352,9 @@ linklengths(const double *x,
             dx = xi - x[j];
             dy = yi - y[j];
             dz = zi - z[j];
-            l[k] = sqrt(dx*dx + dy*dy + dz*dz);
+            l[k - n - 1] = sqrt(dx*dx + dy*dy + dz*dz);
         }
     }
-    l[n] = net[n];
     return lln;
 }
 
@@ -394,8 +392,8 @@ linksinks(const unsigned int *net,
             seen[j] = 1;
             link = 0;
             while(!get(que, &i, &d) && !link) {
-                //if(d > 5)
-                //    break;
+                if(d > 30)
+                    break;
                 if(len < m + 2) {
                     len += 24;
                     list = realloc(list, len * sizeof(unsigned int));
@@ -410,7 +408,7 @@ linksinks(const unsigned int *net,
                     if(seen[l])
                         continue;
                     seen[l]++;
-                    if(z[l] <= zj) {
+                    if(z[l] < zj) {
                         list[m++] = j;
                         list[m++] = l;
                         link = 1;
@@ -425,7 +423,7 @@ linksinks(const unsigned int *net,
                     if(seen[l])
                         continue;
                     seen[l]++;
-                    if(z[l] <= zj) {
+                    if(z[l] < zj) {
                         list[m++] = j;
                         list[m++] = l;
                         link = 1;
@@ -693,7 +691,7 @@ network(const double *z,
                 u = tri[i+j];
                 v = tri[i+(j+1)%3];
                 w = tri[i+(j+2)%3];
-                if(z[v] > z[u] && z[w] > z[u])
+                if(z[v] >= z[u] && z[w] >= z[u])
                     continue;
                 vex = wex = 0;
                 for(k = 2; k < lst[u][1]; k++) {
@@ -702,11 +700,11 @@ network(const double *z,
                     if(lst[u][k] == w)
                         wex = 1;
                 }
-                if(!vex && z[v] <= z[u]) {
+                if(!vex && z[v] < z[u]) {
                     lst[u][lst[u][1]++] = v;
                     l++;
                 }
-                if(!wex && z[w] <= z[u]) {
+                if(!wex && z[w] < z[u]) {
                     lst[u][lst[u][1]++] = w;
                     l++;
                 }
@@ -728,7 +726,7 @@ network(const double *z,
                 u = tri[i+j];
                 v = tri[i+(j+1)%3];
                 w = tri[i+(j+2)%3];
-                if(z[v] <= z[u] && z[w] <= z[u])
+                if(z[v] < z[u] && z[w] < z[u])
                     continue;
                 vex = wex = 0;
                 for(k = 2; k < lst[u][1]; k++) {
@@ -737,11 +735,11 @@ network(const double *z,
                     if(lst[u][k] == w)
                         wex = 1;
                 }
-                if(!vex && z[v] > z[u]) {
+                if(!vex && z[v] >= z[u]) {
                     lst[u][lst[u][1]++] = v;
                     l++;
                 }
-                if(!wex && z[w] > z[u]) {
+                if(!wex && z[w] >= z[u]) {
                     lst[u][lst[u][1]++] = w;
                     l++;
                 }
@@ -788,134 +786,62 @@ gridnetwork(const double *z,
             const unsigned int flow) {
     PyArrayObject *net;
     npy_intp *dim;
-    unsigned int *gn;
-    unsigned int i, j, k, n, m;
+    unsigned int *gn, x, y;
+    unsigned int i, n, m;
     double h;
 
     n = xn * yn;
-    gn = malloc(n * 9 * sizeof(unsigned int));
+    gn = malloc(n * 5 * sizeof(unsigned int));
     if(!gn) {
         PyErr_SetString(PyExc_MemoryError, "...");
         return NULL;
     }
     m = n + 1;
-    for(k = 0; k < xn; k++)
-        gn[k] = m;
+    for(x = 0; x < xn; x++)
+        gn[x] = m;
     if(flow) {
-        for(i = 1; i < yn; i++) {
-            j = i * xn;
-            gn[j] = m;
-            h = z[j];
-            if(h >= MINELEVATION) {
-                if(z[j - xn] <= h)
-                    gn[m++] = j - xn;
-                if(z[j - xn + 1] <= h)
-                    gn[m++] = j - xn + 1;
-                if(z[j + 1] <= h)
-                    gn[m++] = j + 1;
-                if(z[j + xn] <= h)
-                    gn[m++] = j + xn;
-                if(z[j + xn + 1] <= h)
-                    gn[m++] = j + xn + 1;
-            }
-            for(k = 1; k < xn - 1; k++) {
-                j = i * xn + k;
-                gn[j] = m;
-                h = z[j];
+        for(y = 1; y < yn - 1; y++) {
+            gn[y * xn] = m;
+            for(x = 1; x < xn - 1; x++) {
+                i = y * xn + x;
+                gn[i] = m;
+                h = z[i];
                 if(h < MINELEVATION)
                     continue;
-                if(z[j - xn - 1] <= h)
-                    gn[m++] = j - xn - 1;
-                if(z[j - xn] <= h)
-                    gn[m++] = j - xn;
-                if(z[j - xn + 1] <= h)
-                    gn[m++] = j - xn + 1;
-                if(z[j - 1] <= h)
-                    gn[m++] = j - 1;
-                if(z[j + 1] <= h)
-                    gn[m++] = j + 1;
-                if(z[j + xn - 1] <= h)
-                    gn[m++] = j + xn - 1;
-                if(z[j + xn] <= h)
-                    gn[m++] = j + xn;
-                if(z[j + xn + 1] <= h)
-                    gn[m++] = j + xn + 1;
+                if(MINELEVATION < z[i - xn] && z[i - xn] < h)
+                    gn[m++] = i - xn;
+                if(MINELEVATION < z[i - 1] && z[i - 1] < h)
+                    gn[m++] = i - 1;
+                if(MINELEVATION < z[i + 1] && z[i + 1] < h)
+                    gn[m++] = i + 1;
+                if(MINELEVATION < z[i + xn] && z[i + xn] < h)
+                    gn[m++] = i + xn;
             }
-            j = (i + 1) * xn - 1;
-            gn[j] = m;
-            h = z[j];
-            if(h >= MINELEVATION) {
-                if(z[j - xn - 1] <= h)
-                    gn[m++] = j - xn - 1;
-                if(z[j - xn] <= h)
-                    gn[m++] = j - xn;
-                if(z[j - 1] <= h)
-                    gn[m++] = j - 1;
-                if(z[j + xn - 1] <= h)
-                    gn[m++] = j + xn - 1;
-                if(z[j + xn] <= h)
-                    gn[m++] = j + xn;
-            }
+            gn[y * xn + xn - 1] = m;
         }
     } else {
-        for(i = 1; i < yn; i++) {
-            j = i * xn;
-            gn[j] = m;
-            h = z[j];
-            if(h >= MINELEVATION) {
-                if(z[j - xn] >= h)
-                    gn[m++] = j - xn;
-                if(z[j - xn + 1] >= h)
-                    gn[m++] = j - xn + 1;
-                if(z[j + 1] >= h)
-                    gn[m++] = j + 1;
-                if(z[j + xn] >= h)
-                    gn[m++] = j + xn;
-                if(z[j + xn + 1] >= h)
-                    gn[m++] = j + xn + 1;
-            }
-            for(k = 1; k < xn - 1; k++) {
-                j = i * xn + k;
-                gn[j] = m;
-                h = z[j];
+        for(y = 1; y < yn - 1; y++) {
+            gn[y * xn] = m;
+            for(x = 1; x < xn - 1; x++) {
+                i = y * xn + x;
+                gn[i] = m;
+                h = z[i];
                 if(h < MINELEVATION)
                     continue;
-                if(z[j - xn - 1] >= h)
-                    gn[m++] = j - xn - 1;
-                if(z[j - xn] >= h)
-                    gn[m++] = j - xn;
-                if(z[j - xn + 1] >= h)
-                    gn[m++] = j - xn + 1;
-                if(z[j - 1] >= h)
-                    gn[m++] = j - 1;
-                if(z[j + 1] >= h)
-                    gn[m++] = j + 1;
-                if(z[j + xn - 1] >= h)
-                    gn[m++] = j + xn - 1;
-                if(z[j + xn] >= h)
-                    gn[m++] = j + xn;
-                if(z[j + xn + 1] >= h)
-                    gn[m++] = j + xn + 1;
+                if(z[i - xn] >= h)
+                    gn[m++] = i - xn;
+                if(z[i - 1] >= h)
+                    gn[m++] = i - 1;
+                if(z[i + 1] >= h)
+                    gn[m++] = i + 1;
+                if(z[i + xn] >= h)
+                    gn[m++] = i + xn;
             }
-            j = (i + 1) * xn - 1;
-            gn[j] = m;
-            h = z[j];
-            if(h >= MINELEVATION) {
-                if(z[j - xn - 1] >= h)
-                    gn[m++] = j - xn - 1;
-                if(z[j - xn] >= h)
-                    gn[m++] = j - xn;
-                if(z[j - 1] >= h)
-                    gn[m++] = j - 1;
-                if(z[j + xn - 1] >= h)
-                    gn[m++] = j + xn - 1;
-                if(z[j + xn] >= h)
-                    gn[m++] = j + xn;
-            }
+            gn[y * xn + xn - 1] = m;
         }
     }
-    for(k = n - xn; k <= n; k++)
-        gn[k] = m;
+    for(x = n - xn; x <= n; x++)
+        gn[x] = m;
 
     // alloc numpy array
     dim = malloc(sizeof(npy_intp));
@@ -1061,44 +987,40 @@ static PyArrayObject *
 slopes(const double *x,
        const double *y,
        const double *z,
-       const unsigned int *net,
-       const double scale) {
+       const unsigned int *net) {
     PyArrayObject *slp;
     npy_intp *dim;
     unsigned int i, j, k, n;
-    unsigned int *s;
+    double *s;
     double dx, dy;
 
     // alloc numpy array
     n = net[0] - 1;
     dim = malloc(sizeof(npy_intp));
-    dim[0] = net[n];
-    slp = (PyArrayObject *) PyArray_ZEROS(1, dim, PyArray_UINT, 0);
+    dim[0] = net[n] - n - 1;
+    slp = (PyArrayObject *) PyArray_ZEROS(1, dim, PyArray_DOUBLE, 0);
     free(dim);
     if(!slp) {
         PyErr_SetString(PyExc_MemoryError, "...");
         return NULL;
     }
-    s = (unsigned int *) slp->data;
+    s = (double *) slp->data;
 
     // estimate slopes along links
     for(i = 0; i < n; i++) {
-        s[i] = net[i];
         for(k = net[i]; k < net[i+1]; k++) {
             j = net[k];
             dx = x[i] - x[j];
             dy = y[i] - y[j];
-            s[k] = scale * fabs(z[i] - z[j]) / sqrt(dx*dx + dy*dy);
+            s[k - n - 1] = (z[i] - z[j]) / sqrt(dx*dx + dy*dy);
         }
     }
-    s[n] = net[n];
     return slp;
 }
 
 static PyArrayObject *
 throughput(const unsigned int *net,
            const double *lw,
-           const double *nw,
            const unsigned int iter,
            const unsigned int plen) {
     PyArrayObject *tput;
@@ -1121,6 +1043,15 @@ throughput(const unsigned int *net,
         return NULL;
     }
 
+	p = 0;
+	for(i = 0 ; i < n ; i++)
+		for(k = net[i]; k < net[i+1]; k++)
+			if(lw[k - n - 1] < p)
+                p = lw[k - n - 1];
+    if(p < 0) {
+        PyErr_SetString(PyExc_IndexError, "negative link weights are not allowed");
+        return NULL;
+    }
     v = 0;
 #pragma omp parallel for private(i,k,l,o,u,v,p,cum,oset,nbrs) schedule(guided)
     for(i = 0; i < n * iter; i++) {
@@ -1131,9 +1062,9 @@ throughput(const unsigned int *net,
         while(nbrs && o < plen) {
             cum = malloc(nbrs * sizeof(double));
             l = 0;
-            cum[l++] = lw[net[u]] + 1;
+            cum[l++] = lw[net[u] - n - 1] + 0.001;
             for(k = net[u] + 1; k < net[u+1]; k++) {
-                cum[l] = cum[l-1] + lw[k] + 1;
+                cum[l] = cum[l-1] + lw[k - n - 1] + 0.001;
                 l++;
             }
             p = cum[nbrs-1] * drand48();
@@ -1380,12 +1311,15 @@ derivatives(const unsigned int *net,
         if(j == 5 && z[x[4]] > 0) {
             oset = n * omp_get_thread_num();
             c[x[2]+oset] += 1;
+            // three point derivatives
+            //v[x[2]+oset] += z[x[3]] - z[x[1]];
+            //a[x[2]+oset] += z[x[3]] - 2*z[x[2]] + z[x[1]];
+            // five point derivatives
             v[x[2]+oset] += z[x[0]]-8*z[x[1]]+8*z[x[3]]-z[x[4]];
             a[x[2]+oset] += -z[x[0]]+16*z[x[1]]-30*z[x[2]]+16*z[x[3]]-z[x[4]];
         }
         free(x);
     }
-    // end parallel for
 
     // alloc numpy array
     dim = malloc(sizeof(npy_intp));
@@ -1420,6 +1354,9 @@ derivatives(const unsigned int *net,
         if(c[k]) {
             ve[k] /= c[k] * 12.0;
             ac[k] /= c[k] * 12.0;
+        } else {
+            ve[k] = 0;
+            ac[k] = 0;
         }
     }
     free(c);
@@ -2013,11 +1950,9 @@ DemNets_Slopes(PyObject *self, PyObject* args) {
     PyArrayObject *x, *y, *z;
     PyArrayObject *net, *slp;
     unsigned int *e, n;
-    double scale;
 
     // parse input
-    scale = 100000;
-    if(!PyArg_ParseTuple(args, "OOOO|d", &xarg, &yarg, &zarg, &netarg, &scale))
+    if(!PyArg_ParseTuple(args, "OOOO", &xarg, &yarg, &zarg, &netarg))
         return NULL;
     x = (PyArrayObject *) PyArray_ContiguousFromObject(xarg, PyArray_DOUBLE, 1, 1);
     y = (PyArrayObject *) PyArray_ContiguousFromObject(yarg, PyArray_DOUBLE, 1, 1);
@@ -2047,7 +1982,7 @@ DemNets_Slopes(PyObject *self, PyObject* args) {
     }
 
     // get slopes
-    slp = slopes((double *)x->data, (double *)y->data, (double *)z->data, e, scale);
+    slp = slopes((double *)x->data, (double *)y->data, (double *)z->data, e);
 
     Py_DECREF(x);
     Py_DECREF(y);
@@ -2127,40 +2062,37 @@ static PyObject *
 DemNets_Throughput(PyObject *self, PyObject* args) {
     PyObject *netarg, *lwarg, *nwarg;
     PyArrayObject *wlinks, *wnodes, *net, *t;
-    unsigned int *e, iter, plen;
+    unsigned int *e, n, iter, plen;
 
     // parse input
-    iter = 1;
+    iter = 100;
     plen = MAXPATHLEN;
-    if(!PyArg_ParseTuple(args, "OOO|II", &netarg, &lwarg, &nwarg, &iter, &plen))
+    if(!PyArg_ParseTuple(args, "OO|II", &netarg, &lwarg, &iter, &plen))
         return NULL;
     net = (PyArrayObject *) PyArray_ContiguousFromObject(netarg, PyArray_UINT, 1, 1);
     wlinks = (PyArrayObject *) PyArray_ContiguousFromObject(lwarg, PyArray_DOUBLE, 1, 1);
-    wnodes = (PyArrayObject *) PyArray_ContiguousFromObject(nwarg, PyArray_DOUBLE, 1, 1);
-    if(!net || !wlinks || !wnodes)
+//    wnodes = (PyArrayObject *) PyArray_ContiguousFromObject(nwarg, PyArray_DOUBLE, 1, 1);
+    if(!net || !wlinks)
         return NULL;
 
     // check input
     e = (unsigned int *) net->data;
-    if(e[e[0] - 1] != net->dimensions[0]) {
+    n = e[0] - 1;
+    if(e[n] != net->dimensions[0]) {
         PyErr_SetString(PyExc_IndexError, "corrupted network format.");
         return NULL;
     }
-    if(e[e[0] - 1] != wlinks->dimensions[0]) {
+    if(e[n] - n - 1!= wlinks->dimensions[0]) {
         PyErr_SetString(PyExc_IndexError, "link-weight array does not match network.");
-        return NULL;
-    }
-    if(e[0] - 1 != wnodes->dimensions[0]) {
-        PyErr_SetString(PyExc_IndexError, "node-weight array does not match network.");
         return NULL;
     }
 
     // get node throughput
-    t = throughput(e, (double *)wlinks->data, (double *)wnodes->data, iter, plen);
+    t = throughput(e, (double *)wlinks->data, iter, plen);
 
     Py_DECREF(net);
     Py_DECREF(wlinks);
-    Py_DECREF(wnodes);
+//   Py_DECREF(wnodes);
     return PyArray_Return(t);
 }
 
