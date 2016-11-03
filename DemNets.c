@@ -138,9 +138,9 @@ betweenness(const unsigned int *net,
             lwmax = 0;
             for(k = net[i]; k < net[i+1]; k++)
                 if(lw[k] > lwmax)
-                    lwmax = lw[k];
+                    lwmax = lw[k - n - 1];
             for(k = net[i]; k < net[i+1]; k++) {
-                if(lw[k] < 0.3333 * lwmax)
+                if(lw[k - n - 1] < 0.3333 * lwmax)
                     continue;
                 l = net[k];
                 if(no[l]) {
@@ -170,10 +170,10 @@ betweenness(const unsigned int *net,
             // all neighbors l of i
             lwmax = 0;
             for(k = net[i]; k < net[i+1]; k++)
-                if(lw[k] > lwmax)
-                    lwmax = lw[k];
+                if(lw[k - n - 1] > lwmax)
+                    lwmax = lw[k - n - 1];
             for(k = net[i]; k < net[i+1]; k++) {
-                if(lw[k] < 0.3333 * lwmax)
+                if(lw[k - n - 1] < 0.3333 * lwmax)
                     continue;
                 l = net[k];
                 // follow only shortest paths
@@ -321,7 +321,7 @@ sinkdistance(const unsigned int *net,
 static PyArrayObject *
 linklengths(const double *x,
             const double *y,
-            const double *z,
+            //const double *z,
             const unsigned int *net) {
     PyArrayObject *lln;
     npy_intp *dim;
@@ -346,27 +346,30 @@ linklengths(const double *x,
     for(i = 0; i < n; i++) {
         xi = x[i];
         yi = y[i];
-        zi = z[i];
+        //zi = z[i];
         for(k = net[i]; k < net[i+1]; k++) {
             j = net[k];
             dx = xi - x[j];
             dy = yi - y[j];
-            dz = zi - z[j];
-            l[k - n - 1] = sqrt(dx*dx + dy*dy + dz*dz);
+            //dz = zi - z[j];
+            l[k - n - 1] = sqrt(dx*dx + dy*dy);
         }
     }
     return lln;
 }
 
-static PyArrayObject *
+static PyObject *
 linksinks(const unsigned int *net,
           const unsigned int *ten,
-          const double *z) {
-    PyArrayObject *new;
+          const double *x,
+          const double *y,
+          const double *z,
+          const double maxdistance) {
+    PyArrayObject *tubes, *sinks;
     npy_intp *dim;
-    double zj;
-    unsigned int i, j, k, l, n, m;
-    unsigned int len, d, *e;
+    double xj, yj, zj, dx, dy, dthr;
+    unsigned int i, j, k, l, n, m, q, p;
+    unsigned int len, d, *e, *s;
     unsigned int *seen, *list, link;
     Queue *que;
 
@@ -376,96 +379,130 @@ linksinks(const unsigned int *net,
     len = 0;
     for(j = 0; j < n; j++) {
         if(net[j] == net[j+1]) {
-            zj = z[j];
-            que = malloc(sizeof(Queue));
-            que->first = que->last = NULL;
-            seen = calloc(n, sizeof(unsigned int));
-            if(!seen) {
-                PyErr_SetString(PyExc_MemoryError, "...");
-                exit(EXIT_FAILURE);
-            }
-            // put sink into queue
-            if(put(que, j, 0)) {
-                PyErr_SetString(PyExc_MemoryError, "failed to fill queue ..");
-                exit(EXIT_FAILURE);
-            }
-            seen[j] = 1;
-            link = 0;
-            while(!get(que, &i, &d) && !link) {
-                if(d > 30)
-                    break;
-                if(len < m + 2) {
-                    len += 24;
-                    list = realloc(list, len * sizeof(unsigned int));
-                    if(!list) {
-                        PyErr_SetString(PyExc_MemoryError, "...");
-                        exit(EXIT_FAILURE);
-                    }
-                }
-                // all neighbors l of i
-                for(k = net[i]; k < net[i+1]; k++) {
-                    l = net[k];
-                    if(seen[l])
-                        continue;
-                    seen[l]++;
-                    if(z[l] < zj) {
-                        list[m++] = j;
-                        list[m++] = l;
-                        link = 1;
-                        break;
-                    }
-                    put(que, l, d+1);
-                }
-                if(link)
-                    break;
-                for(k = ten[i]; k < ten[i+1]; k++) {
-                    l = ten[k];
-                    if(seen[l])
-                        continue;
-                    seen[l]++;
-                    if(z[l] < zj) {
-                        list[m++] = j;
-                        list[m++] = l;
-                        link = 1;
-                        break;
-                    }
-                    put(que, l, d+1);
+            if(len < m + 2) {
+                len += 1024;
+                list = realloc(list, len * sizeof(unsigned int));
+                if(!list) {
+                    PyErr_SetString(PyExc_MemoryError, "...");
+                    exit(EXIT_FAILURE);
                 }
             }
-            free(seen);
-            free(que);
+            list[m++] = j;
+            list[m++] = n+1;
         }
     }
     if(!m) {
-        free(list);
-        PyErr_SetString(PyExc_RuntimeError, "no sink was linked.");
+        PyErr_SetString(PyExc_RuntimeError, "no dead ends in the network?");
         return NULL;
     }
+    dthr = maxdistance * maxdistance;
 
-    // alloc numpy array
-    dim = malloc(sizeof(npy_intp));
-    dim[0] = n + m/2 + 1;
-    new = (PyArrayObject *) PyArray_ZEROS(1, dim, PyArray_UINT, 0);
-    free(dim);
-    if(!new) {
+#pragma omp parallel for private(q,j,xj,yj,zj,que,seen,link,i,d,dx,dy,k,l) schedule(guided)
+    for(q = 0; q < m; q += 2) {
+        j = list[q];
+        xj = x[j];
+        yj = y[j];
+        zj = z[j];
+		if(zj < MINELEVATION)
+			continue;
+        que = malloc(sizeof(Queue));
+        que->first = que->last = NULL;
+        seen = calloc(n, sizeof(unsigned int));
+        if(!seen) {
+            PyErr_SetString(PyExc_MemoryError, "...");
+            exit(EXIT_FAILURE);
+        }
+        // put sink into queue
+        if(put(que, j, 0)) {
+            PyErr_SetString(PyExc_MemoryError, "failed to fill queue ..");
+            exit(EXIT_FAILURE);
+        }
+        seen[j] = 1;
+        link = 0;
+        while(!get(que, &i, &d) && !link) {
+            if(d > 100)
+                break;
+            // all neighbors l of i
+            for(k = net[i]; k < net[i+1]; k++) {
+                l = net[k];
+                if(seen[l])
+                    continue;
+                seen[l]++;
+				dx = xj - x[l];
+                dy = yj - y[l];
+                if(z[l] < zj && dx*dx+dy*dy < dthr) {
+                    list[q+1] = l;
+                    link = 1;
+                    break;
+                }
+                put(que, l, d+1);
+            }
+            if(link)
+                break;
+            for(k = ten[i]; k < ten[i+1]; k++) {
+                l = ten[k];
+                if(seen[l])
+                    continue;
+                seen[l]++;
+				dx = xj - x[l];
+                dy = yj - y[l];
+				if(z[l] < zj && dx*dx+dy*dy < dthr) {
+                    list[q+1] = l;
+                    link = 1;
+                    break;
+                }
+                put(que, l, d+1);
+            }
+        }
+        while(!get(que, &i, &d));
+        free(seen);
+        free(que);
+    }
+
+    // store in compressed row format
+    l = k = 0;
+    j = n + 1;
+    e = malloc((n + m/2 + 1) * sizeof(unsigned int));
+    s = malloc(m / 2 * sizeof(unsigned int));
+    if(!e || !s) {
         PyErr_SetString(PyExc_MemoryError, "...");
         return NULL;
     }
-    e = (unsigned int *) new->data;
-
-    // store in compressed row format
-    l = 0;
-    j = n + 1;
     for(i = 0; i < n; i++) {
         e[i] = j;
-        while(list[l] == i) {
-            e[j++] = list[++l];
+        if(i == list[l]) {
+            l++;
+            if(list[l] < n)
+                e[j++] = list[l];
+            else
+                s[k++] = list[l-1];
             l++;
         }
     }
     e[n] = j;
     free(list);
-    return new;
+
+    // alloc numpy array
+    dim = malloc(sizeof(npy_intp));
+    dim[0] = j;
+    tubes = (PyArrayObject *) PyArray_ZEROS(1, dim, PyArray_UINT, 0);
+    if(!tubes) {
+        PyErr_SetString(PyExc_MemoryError, "...");
+        return NULL;
+    }
+    memcpy(tubes->data, e, j * sizeof(unsigned int));
+    free(e);
+    dim[0] = k;
+    sinks = (PyArrayObject *) PyArray_ZEROS(1, dim, PyArray_UINT, 0);
+    free(dim);
+    if(!sinks) {
+        PyErr_SetString(PyExc_MemoryError, "...");
+        return NULL;
+    }
+    memcpy(sinks->data, s, k * sizeof(unsigned int));
+    free(s);
+
+	return Py_BuildValue("(OO)", tubes, sinks);
 }
 
 static PyArrayObject *
@@ -616,9 +653,9 @@ flowdistance(const unsigned int *net,
         while(nbrs && q < plen) {
             cum = malloc(nbrs * sizeof(double));
             l = 0;
-            cum[l++] = lw[net[u]] + 1;
+            cum[l++] = lw[net[u] - n - 1] + 0.0001;
             for(k = net[u] + 1; k < net[u+1]; k++) {
-                cum[l] = cum[l-1] + lw[k] + 1;
+                cum[l] = cum[l-1] + lw[k - n - 1] + 0.0001;
                 l++;
             }
             p = cum[nbrs-1] * drand48();
@@ -1062,9 +1099,9 @@ throughput(const unsigned int *net,
         while(nbrs && o < plen) {
             cum = malloc(nbrs * sizeof(double));
             l = 0;
-            cum[l++] = lw[net[u] - n - 1] + 0.001;
+            cum[l++] = lw[net[u] - n - 1] + 0.0001;
             for(k = net[u] + 1; k < net[u+1]; k++) {
-                cum[l] = cum[l-1] + lw[k - n - 1] + 0.001;
+                cum[l] = cum[l-1] + lw[k - n - 1] + 0.0001;
                 l++;
             }
             p = cum[nbrs-1] * drand48();
@@ -1141,9 +1178,9 @@ pathlengths(const unsigned int *net,
             c[v + oset] += 1;
             cum = malloc(nbrs * sizeof(double));
             l = 0;
-            cum[l++] = lw[net[u]] + 1;
+            cum[l++] = lw[net[u] - n - 1] + 0.0001;
             for(k = net[u] + 1; k < net[u+1]; k++) {
-                cum[l] = cum[l-1] + lw[k] + 1;
+                cum[l] = cum[l-1] + lw[k - n - 1] + 0.0001;
                 l++;
             }
             p = cum[nbrs-1] * drand48();
@@ -1225,9 +1262,9 @@ revisits(const unsigned int *net,
             c[u]++;
             cum = malloc(nbrs * sizeof(double));
             l = 0;
-            cum[l++] = lw[net[u]] + 1;
+            cum[l++] = lw[net[u] - n - 1] + 0.0001;
             for(k = net[u] + 1; k < net[u+1]; k++) {
-                cum[l] = cum[l-1] + lw[k] + 1;
+                cum[l] = cum[l-1] + lw[k - n - 1] + 0.0001;
                 l++;
             }
             p = cum[nbrs-1] * drand48();
@@ -1292,9 +1329,9 @@ derivatives(const unsigned int *net,
         while(nbrs > 0 && z[x[j]] > 0 && j < 5) {
             cum = malloc(nbrs * sizeof(double));
             l = 0;
-            cum[l++] = lw[net[x[j]]] + 1;
+            cum[l++] = lw[net[x[j]] - n - 1] + 0.0001;
             for(k = net[x[j]] + 1; k < net[x[j]+1]; k++) {
-                cum[l] = cum[l-1] + lw[k] + 1;
+                cum[l] = cum[l-1] + lw[k - n - 1] + 0.0001;
                 l++;
             }
             p = cum[nbrs-1] * drand48();
@@ -1404,9 +1441,9 @@ walk(const unsigned int *net,
     while(nbrs && o < plen) {
         cum = malloc(nbrs * sizeof(double));
         l = 0;
-        cum[l++] = lw[net[u]] + 1;
+        cum[l++] = lw[net[u] - n - 1] + 0.0001;
         for(k = net[u] + 1; k < net[u+1]; k++) {
-            cum[l] = cum[l-1] + lw[k] + 1;
+            cum[l] = cum[l-1] + lw[k - n - 1] + 0.0001;
             l++;
         }
         p = cum[nbrs-1] * drand48();
@@ -1494,9 +1531,9 @@ walks(const unsigned int *net,
         while(nbrs && o < plen) {
             cum = malloc(nbrs * sizeof(double));
             l = 0;
-            cum[l++] = lw[net[u]] + 1;
+            cum[l++] = lw[net[u] - n - 1] + 0.0001;
             for(k = net[u] + 1; k < net[u+1]; k++) {
-                cum[l] = cum[l-1] + lw[k] + 1;
+                cum[l] = cum[l-1] + lw[k - n - 1] + 0.0001;
                 l++;
             }
             p = cum[nbrs-1] * drand48();
@@ -1600,9 +1637,9 @@ hillslopelengths(const unsigned int *net,
             c[o]++;
             cum = malloc(nbrs * sizeof(double));
             l = 0;
-            cum[l++] = lw[net[x]] + 1;
+            cum[l++] = lw[net[x] - n - 1] + 0.0001;
             for(k = net[x] + 1; k < net[x+1]; k++) {
-                cum[l] = cum[l-1] + lw[k] + 1;
+                cum[l] = cum[l-1] + lw[k - n - 1] + 0.0001;
                 l++;
             }
             p = cum[nbrs-1] * drand48();
@@ -1711,13 +1748,13 @@ DemNets_LinkLengths(PyObject *self, PyObject* args) {
     unsigned int *e, n;
 
     // parse input
-    if(!PyArg_ParseTuple(args, "OOOO", &xarg, &yarg, &zarg, &netarg))
+    if(!PyArg_ParseTuple(args, "OOO", &xarg, &yarg, &netarg))
         return NULL;
     x = (PyArrayObject *) PyArray_ContiguousFromObject(xarg, PyArray_DOUBLE, 1, 1);
     y = (PyArrayObject *) PyArray_ContiguousFromObject(yarg, PyArray_DOUBLE, 1, 1);
-    z = (PyArrayObject *) PyArray_ContiguousFromObject(zarg, PyArray_DOUBLE, 1, 1);
+    //z = (PyArrayObject *) PyArray_ContiguousFromObject(zarg, PyArray_DOUBLE, 1, 1);
     net = (PyArrayObject *) PyArray_ContiguousFromObject(netarg, PyArray_UINT, 1, 1);
-    if(!x || !y || !z || !net)
+    if(!x || !y || !net)
         return NULL;
 
     // check input
@@ -1726,13 +1763,13 @@ DemNets_LinkLengths(PyObject *self, PyObject* args) {
         PyErr_SetString(PyExc_IndexError, "(x, y) not of the same dimension.");
         return NULL;
     }
-    if(n != z->dimensions[0]) {
-        PyErr_SetString(PyExc_IndexError, "(x, y, z) not of the same dimension.");
-        return NULL;
-    }
+    //if(n != z->dimensions[0]) {
+    //    PyErr_SetString(PyExc_IndexError, "(x, y, z) not of the same dimension.");
+    //    return NULL;
+    //}
     e = (unsigned int *) net->data;
     if(n != e[0] - 1) {
-        PyErr_SetString(PyExc_IndexError, "(x, y, z) does not match with the network.");
+        PyErr_SetString(PyExc_IndexError, "(x, y) does not match with the network.");
         return NULL;
     }
     if(e[n] != net->dimensions[0]) {
@@ -1741,11 +1778,11 @@ DemNets_LinkLengths(PyObject *self, PyObject* args) {
     }
 
     // get link distances
-    lln = linklengths((double *)x->data, (double *)y->data, (double *)z->data, e);
+    lln = linklengths((double *)x->data, (double *)y->data, e);
 
     Py_DECREF(x);
     Py_DECREF(y);
-    Py_DECREF(z);
+    //Py_DECREF(z);
     Py_DECREF(net);
     return PyArray_Return(lln);
 }
@@ -1870,40 +1907,47 @@ DemNets_FlowNetworkFromGrid(PyObject *self, PyObject* args) {
 
 static PyObject *
 DemNets_LinkSinks(PyObject *self, PyObject* args) {
-    PyObject *elearg, *netarg, *tenarg;
-    PyArrayObject *ele, *net, *ten, *new;
-    unsigned int *x, n;
+    PyObject *xarg, *yarg, *zarg, *netarg, *tenarg, *obj;
+    PyArrayObject *x, *y, *z, *net, *ten;
+    unsigned int *e, n;
+    double maxdistance;
+
+    maxdistance = 50;
 
     // parse input
-    if(!PyArg_ParseTuple(args, "OOO", &netarg, &tenarg, &elearg))
+    if(!PyArg_ParseTuple(args, "OOOOO|d", &netarg, &tenarg, &xarg, &yarg, &zarg, &maxdistance))
         return NULL;
     net = (PyArrayObject *) PyArray_ContiguousFromObject(netarg, PyArray_UINT, 1, 1);
     ten = (PyArrayObject *) PyArray_ContiguousFromObject(tenarg, PyArray_UINT, 1, 1);
-    ele = (PyArrayObject *) PyArray_ContiguousFromObject(elearg, PyArray_DOUBLE, 1, 1);
-    if(!ele || !net || !ten)
+    x = (PyArrayObject *) PyArray_ContiguousFromObject(xarg, PyArray_DOUBLE, 1, 1);
+    y = (PyArrayObject *) PyArray_ContiguousFromObject(yarg, PyArray_DOUBLE, 1, 1);
+    z = (PyArrayObject *) PyArray_ContiguousFromObject(zarg, PyArray_DOUBLE, 1, 1);
+    if(!net || !ten || !x || !y || !z)
         return NULL;
 
     // check input
-    n = ele->dimensions[0];
-    x = (unsigned int *) net->data;
-    if(n != x[0] - 1) {
+    n = x->dimensions[0];
+    e = (unsigned int *) net->data;
+    if(n != e[0] - 1) {
         PyErr_SetString(PyExc_IndexError, "elevation measures do not match with the flow network.");
         return NULL;
     }
-    if(x[n] != net->dimensions[0]) {
+    if(e[n] != net->dimensions[0]) {
         PyErr_SetString(PyExc_IndexError, "corrupted network format for the flow network.");
         return NULL;
     }
-    x = (unsigned int *) ten->data;
-    if(x[n] != ten->dimensions[0]) {
+    e = (unsigned int *) ten->data;
+    if(e[n] != ten->dimensions[0]) {
         PyErr_SetString(PyExc_IndexError, "corrupted network format for the reverse flow network.");
         return NULL;
     }
-    new = linksinks((unsigned int *)net->data, (unsigned int *)ten->data, (double *)ele->data);
-    Py_DECREF(ele);
+    obj = linksinks((unsigned int *)net->data, (unsigned int *)ten->data, (double *)x->data, (double *)y->data, (double *)z->data, maxdistance);
+    Py_DECREF(x);
+    Py_DECREF(y);
+    Py_DECREF(z);
     Py_DECREF(net);
     Py_DECREF(ten);
-    return PyArray_Return(new);
+    return obj;
 }
 
 static PyObject *
@@ -2082,7 +2126,7 @@ DemNets_Throughput(PyObject *self, PyObject* args) {
         PyErr_SetString(PyExc_IndexError, "corrupted network format.");
         return NULL;
     }
-    if(e[n] - n - 1!= wlinks->dimensions[0]) {
+    if(e[n] - n - 1 != wlinks->dimensions[0]) {
         PyErr_SetString(PyExc_IndexError, "link-weight array does not match network.");
         return NULL;
     }
@@ -2170,7 +2214,7 @@ static PyObject *
 DemNets_Derivatives(PyObject *self, PyObject* args) {
     PyObject *netarg, *lwarg, *zarg, *vds;
     PyArrayObject *wlinks, *z, *net;
-    unsigned int *e, iter, plen;
+    unsigned int *e, n, iter, plen;
 
     // parse input
     iter = 100;
@@ -2184,15 +2228,16 @@ DemNets_Derivatives(PyObject *self, PyObject* args) {
 
     // check input
     e = (unsigned int *) net->data;
-    if(e[e[0] - 1] != net->dimensions[0]) {
+    n = e[0] - 1;
+    if(e[n] != net->dimensions[0]) {
         PyErr_SetString(PyExc_IndexError, "corrupted network format.");
         return NULL;
     }
-    if(e[e[0] - 1] != wlinks->dimensions[0]) {
+    if(e[n] - n - 1 != wlinks->dimensions[0]) {
         PyErr_SetString(PyExc_IndexError, "link-weight array does not match network.");
         return NULL;
     }
-    if(e[0] - 1 != z->dimensions[0]) {
+    if(n != z->dimensions[0]) {
         PyErr_SetString(PyExc_IndexError, "height array does not match network.");
         return NULL;
     }
