@@ -16,7 +16,7 @@ typedef struct Node Node;
 struct Node {
     Node *next;
     unsigned int i;
-    unsigned int d;
+    double d;
 };
 
 struct Queue {
@@ -50,7 +50,7 @@ initrng(void) {
 int
 put(Queue *q,
     const unsigned int i,
-    const unsigned int d) {
+    const double d) {
     Node *n;
     n = malloc(sizeof(Node));
     if(!n)
@@ -70,7 +70,7 @@ put(Queue *q,
 int
 get(Queue *q,
     unsigned int *i,
-    unsigned int *d) {
+    double *d) {
     Node *tmp;
     if(!q->first)
         return 1;
@@ -83,146 +83,14 @@ get(Queue *q,
 }
 
 static PyArrayObject *
-betweenness(const unsigned int *net,
-            const double *lw,
-            const double *nw) {
-    PyArrayObject *betw;
-    npy_intp *dim;
-    double *b;
-
-    unsigned int i, j, k, l, m, n;
-    unsigned int d, *dd, oset;
-    double *r, *db, *no, fact;
-    Queue *open;
-    Stack *done, *work, *tmp;
-
-    double lwmax;
-
-    n = net[0] - 1;
-#pragma omp parallel
-    m = omp_get_num_threads();
-
-    r = calloc(n * m, sizeof(double));
-    if(!r) {
-        PyErr_SetString(PyExc_MemoryError, "...");
-        return NULL;
-    }
-#pragma omp parallel for private(d,i,j,k,l,oset,fact,open,done,work,tmp,db,no,dd)
-    for(j = 0; j < n; j++) {
-        open = malloc(sizeof(Queue));
-        done = malloc(sizeof(Stack));
-        open->first = open->last = NULL;
-        done->head = NULL;
-        db = calloc(n, sizeof(double));
-        no = calloc(n, sizeof(double));
-        dd = calloc(n, sizeof(unsigned int));
-        if(!db || !no || !dd) {
-            PyErr_SetString(PyExc_MemoryError, "...");
-            exit(EXIT_FAILURE);
-        }
-        no[j] = nw[j];
-        dd[j] = 0;
-        // put root into queue
-        if(put(open, j, 0)) {
-            PyErr_SetString(PyExc_MemoryError, "failed to fill queue ..");
-            exit(EXIT_FAILURE);
-        }
-        while(!get(open, &i, &d)) {
-            // add nodes to stack with increasing distance d
-            work = malloc(sizeof(Stack));
-            work->i = i;
-            work->head = done->head;
-            done->head = work;
-            d++;
-            // all neighbors l of i
-            lwmax = 0;
-            for(k = net[i]; k < net[i+1]; k++)
-                if(lw[k] > lwmax)
-                    lwmax = lw[k - n - 1];
-            for(k = net[i]; k < net[i+1]; k++) {
-                if(lw[k - n - 1] < 0.3333 * lwmax)
-                    continue;
-                l = net[k];
-                if(no[l]) {
-                    // we have seen l - more shortest paths
-                    if(dd[l] == d)
-                        no[l] += nw[l] * no[i];
-                } else {
-                    // first time at l
-                    no[l] = nw[l] * no[i];
-                    dd[l] = d;
-                    if(put(open, l, d)) {
-                        PyErr_SetString(PyExc_MemoryError, "failed to fill queue ..");
-                        exit(EXIT_FAILURE);
-                    }
-                }
-            }
-        }
-        // empty stack
-        for(work = done->head; work->head != NULL;) {
-            i = work->i;
-            tmp = work;
-            work = work->head;
-            free(tmp);
-            if(dd[i] <= 1)
-                continue;
-            fact = nw[i] * (nw[i] + db[i]) / no[i];
-            // all neighbors l of i
-            lwmax = 0;
-            for(k = net[i]; k < net[i+1]; k++)
-                if(lw[k - n - 1] > lwmax)
-                    lwmax = lw[k - n - 1];
-            for(k = net[i]; k < net[i+1]; k++) {
-                if(lw[k - n - 1] < 0.3333 * lwmax)
-                    continue;
-                l = net[k];
-                // follow only shortest paths
-                if(dd[l] == dd[i] - 1)
-                    db[l] += no[l] * fact;
-            }
-        }
-        free(open);
-        free(done);
-        free(no);
-        free(dd);
-        oset = n * omp_get_thread_num();
-        for(k = 0; k < n; k++)
-            r[k + oset] += nw[j] * db[k];
-        free(db);
-    }
-
-    // alloc numpy array
-    dim = malloc(sizeof(npy_intp));
-    dim[0] = n;
-    betw = (PyArrayObject *) PyArray_ZEROS(1, dim, PyArray_DOUBLE, 0);
-    free(dim);
-    if(!betw) {
-        PyErr_SetString(PyExc_MemoryError, "...");
-        return NULL;
-    }
-    b = (double *) betw->data;
-
-    /* reduction of threaded array */
-    for(i = 0; i < m; i++) {
-        oset = i * n;
-        for(j = 0; j < n; j++)
-            b[j] += r[j + oset];
-    }
-    free(r);
-    for(j = 0; j < n; j++)
-        b[j] /= nw[j];
-
-    return betw;
-}
-
-static PyArrayObject *
 components(const unsigned int *net,
            const unsigned int *seeds, const unsigned int nseeds) {
     PyArrayObject *com;
     npy_intp *dim;
     unsigned int i, j, k, l;
-    unsigned int *c, n, d;
+    unsigned int *c, n;
     unsigned int *seen;
+	double d;
     Queue *que;
 
     n = net[0] - 1;
@@ -275,7 +143,8 @@ sinkdistance(const unsigned int *net,
     PyArrayObject *dist;
     npy_intp *dim;
     unsigned int i, k, l;
-    unsigned int *seen, *d, di;
+    unsigned int *seen, *d;
+	double di;
     Queue *que;
 
     // alloc numpy array
@@ -367,9 +236,9 @@ linksinks(const unsigned int *net,
           const double maxdistance) {
     PyArrayObject *tubes, *sinks;
     npy_intp *dim;
-    double xj, yj, zj, dx, dy, dthr;
+    double xj, yj, zj, d, dx, dy, dthr;
     unsigned int i, j, k, l, n, m, q, p;
-    unsigned int len, d, *e, *s;
+    unsigned int len, *e, *s;
     unsigned int *seen, *list, link;
     Queue *que;
 
@@ -503,118 +372,6 @@ linksinks(const unsigned int *net,
     free(s);
 
 	return Py_BuildValue("(OO)", tubes, sinks);
-}
-
-static PyArrayObject *
-linksinksr(const unsigned int *net,
-           const unsigned int *ten,
-           const double *z) {
-    PyArrayObject *new;
-    npy_intp *dim;
-    double zj;
-    unsigned int i, j, k, l, n, m;
-    unsigned int len, d, *e;
-    unsigned int *seen, *list, link;
-    Queue *que;
-
-    n = net[0] - 1;
-    m = 0;
-    list = NULL;
-    len = 0;
-    for(j = 0; j < n; j++) {
-        if(net[j] == net[j+1]) {
-            zj = z[j];
-            que = malloc(sizeof(Queue));
-            que->first = que->last = NULL;
-            seen = calloc(n, sizeof(unsigned int));
-            if(!seen) {
-                PyErr_SetString(PyExc_MemoryError, "...");
-                exit(EXIT_FAILURE);
-            }
-            // put sink into queue
-            if(put(que, j, 0)) {
-                PyErr_SetString(PyExc_MemoryError, "failed to fill queue ..");
-                exit(EXIT_FAILURE);
-            }
-            seen[j] = 1;
-            link = 0;
-            while(!get(que, &i, &d) && !link) {
-                //if(d > 5)
-                //    break;
-                if(len < m + 2) {
-                    len += 24;
-                    list = realloc(list, len * sizeof(unsigned int));
-                    if(!list) {
-                        PyErr_SetString(PyExc_MemoryError, "...");
-                        exit(EXIT_FAILURE);
-                    }
-                }
-                // all neighbors l of i
-                for(k = net[i]; k < net[i+1]; k++) {
-                    l = net[k];
-                    if(seen[l])
-                        continue;
-                    seen[l]++;
-                    if(z[l] <= zj) {
-                        list[m++] = l;
-                        list[m++] = j;
-                        link = 1;
-                        break;
-                    }
-                    put(que, l, d+1);
-                }
-                if(link)
-                    break;
-                for(k = ten[i]; k < ten[i+1]; k++) {
-                    l = ten[k];
-                    if(seen[l])
-                        continue;
-                    seen[l]++;
-                    if(z[l] <= zj) {
-                        list[m++] = l;
-                        list[m++] = j;
-                        link = 1;
-                        break;
-                    }
-                    put(que, l, d+1);
-                }
-            }
-            free(seen);
-            free(que);
-        }
-    }
-    if(!m) {
-        free(list);
-        PyErr_SetString(PyExc_RuntimeError, "no sink was linked.");
-        return NULL;
-    }
-    for(i = 0; i < m; i+=2)
-        fprintf(stderr, "%i %i\n", list[i], list[i+1]);
-
-    // alloc numpy array
-    dim = malloc(sizeof(npy_intp));
-    dim[0] = n + m/2 + 1;
-    new = (PyArrayObject *) PyArray_ZEROS(1, dim, PyArray_UINT, 0);
-    free(dim);
-    if(!new) {
-        PyErr_SetString(PyExc_MemoryError, "...");
-        return NULL;
-    }
-    e = (unsigned int *) new->data;
-
-    // store in compressed row format
-    l = 0;
-    j = n + 1;
-    for(i = 0; i < n; i++) {
-        e[i] = j;
-        while(list[l] == i) {
-            e[j++] = list[++l];
-            l++;
-        }
-    }
-    e[n] = j;
-    free(list);
-    return new;
 }
 
 static PyArrayObject *
@@ -1056,7 +813,7 @@ slopes(const double *x,
 }
 
 static PyArrayObject *
-throughput(const unsigned int *net,
+rwthroughput(const unsigned int *net,
            const double *lw,
            const unsigned int iter,
            const unsigned int plen) {
@@ -1094,6 +851,7 @@ throughput(const unsigned int *net,
     for(i = 0; i < n * iter; i++) {
         oset = n * omp_get_thread_num();
         u = i % n;
+		c[u + oset] += 1;
         o = 0;
         nbrs = net[u+1] - net[u];
         while(nbrs && o < plen) {
@@ -1138,6 +896,83 @@ throughput(const unsigned int *net,
         for(k = 0; k < n; k++)
             t[k] += (double)c[k + oset] / iter;
     }
+    free(c);
+    return tput;
+}
+
+static PyArrayObject *
+throughput(const unsigned int *net,
+           const double *lw,
+           const double *nw) {
+    PyArrayObject *tput;
+    npy_intp *dim;
+    unsigned int i, j, k;
+    unsigned int n, *c;
+    unsigned int *seen;
+    double *t, ltp, lws;
+    Queue *que;
+
+    // alloc numpy array for output
+    n = net[0] - 1;
+    dim = malloc(sizeof(npy_intp));
+    dim[0] = n;
+    tput = (PyArrayObject *) PyArray_ZEROS(1, dim, PyArray_DOUBLE, 0);
+    free(dim);
+    if(!tput) {
+        PyErr_SetString(PyExc_MemoryError, "...");
+        return NULL;
+    }
+    t = (double *) tput->data;
+
+    seen = calloc(n, sizeof(unsigned int));
+    que = malloc(sizeof(Queue));
+    c = calloc(n, sizeof(unsigned int));
+    if(!c || !que || !seen) {
+        PyErr_SetString(PyExc_MemoryError, "...");
+        return NULL;
+    }
+
+    for(i = 0 ; i < n ; i++)
+        for(k = net[i]; k < net[i+1]; k++)
+            c[net[k]]++;
+    que->first = que->last = NULL;
+    for(i = 0 ; i < n ; i++) {
+        // hill tops
+        if(!c[i] && net[i] < net[i+1]) {
+            t[i] = nw[i];
+            lws = 0;
+            for(k = net[i]; k < net[i+1]; k++)
+                lws += lw[k - n - 1];
+            for(k = net[i]; k < net[i+1]; k++) {
+                j = net[k];
+                // put children of hill tops into queue
+                if(put(que, j, lw[k-n-1] * t[i] / lws)) {
+                    PyErr_SetString(PyExc_MemoryError, "failed to fill queue ..");
+                    exit(EXIT_FAILURE);
+                }
+            }
+            seen[i] = 1;
+        }
+    }
+    while(!get(que, &i, &ltp)) {
+        t[i] += ltp;
+        if(seen[i] == c[i] - 1) {
+            t[i] += nw[i];
+            lws = 0;
+            for(k = net[i]; k < net[i+1]; k++)
+                lws += lw[k - n - 1];
+            for(k = net[i]; k < net[i+1]; k++) {
+                j = net[k];
+                if(put(que, j, lw[k-n-1] * t[i] / lws)) {
+                    PyErr_SetString(PyExc_MemoryError, "failed to fill queue ..");
+                    exit(EXIT_FAILURE);
+                }
+            }
+        }
+        seen[i]++;
+    }
+    free(seen);
+    free(que);
     free(c);
     return tput;
 }
@@ -1674,45 +1509,6 @@ hillslopelengths(const unsigned int *net,
 }
 
 static PyObject *
-DemNets_Betweenness(PyObject *self, PyObject* args) {
-    PyObject *netarg, *lwarg, *nwarg;
-    PyArrayObject *wlinks, *wnodes, *net, *b;
-    unsigned int *e;
-
-    // parse input
-    if(!PyArg_ParseTuple(args, "OOO", &netarg, &lwarg, &nwarg))
-        return NULL;
-    net = (PyArrayObject *) PyArray_ContiguousFromObject(netarg, PyArray_UINT, 1, 1);
-    wlinks = (PyArrayObject *) PyArray_ContiguousFromObject(lwarg, PyArray_DOUBLE, 1, 1);
-    wnodes = (PyArrayObject *) PyArray_ContiguousFromObject(nwarg, PyArray_DOUBLE, 1, 1);
-    if(!net || !wlinks || !wnodes)
-        return NULL;
-
-    // check input
-    e = (unsigned int *) net->data;
-    if(e[e[0] - 1] != net->dimensions[0]) {
-        PyErr_SetString(PyExc_IndexError, "corrupted network format.");
-        return NULL;
-    }
-    if(e[e[0] - 1] != wlinks->dimensions[0]) {
-        PyErr_SetString(PyExc_IndexError, "link-weight array does not match network.");
-        return NULL;
-    }
-    if(e[0] - 1 != wnodes->dimensions[0]) {
-        PyErr_SetString(PyExc_IndexError, "node-weight array does not match network.");
-        return NULL;
-    }
-
-    // get shortest-path betweenness
-    b = betweenness(e, (double *)wlinks->data, (double *)wnodes->data);
-
-    Py_DECREF(net);
-    Py_DECREF(wlinks);
-    Py_DECREF(wnodes);
-    return PyArray_Return(b);
-}
-
-static PyObject *
 DemNets_Components(PyObject *self, PyObject* args) {
     PyObject *netarg, *seedsarg;
     PyArrayObject *net, *com, *seeds;
@@ -1951,44 +1747,6 @@ DemNets_LinkSinks(PyObject *self, PyObject* args) {
 }
 
 static PyObject *
-DemNets_LinkSinks_r(PyObject *self, PyObject* args) {
-    PyObject *elearg, *netarg, *tenarg;
-    PyArrayObject *ele, *net, *ten, *new;
-    unsigned int *x, n;
-
-    // parse input
-    if(!PyArg_ParseTuple(args, "OOO", &netarg, &tenarg, &elearg))
-        return NULL;
-    net = (PyArrayObject *) PyArray_ContiguousFromObject(netarg, PyArray_UINT, 1, 1);
-    ten = (PyArrayObject *) PyArray_ContiguousFromObject(tenarg, PyArray_UINT, 1, 1);
-    ele = (PyArrayObject *) PyArray_ContiguousFromObject(elearg, PyArray_DOUBLE, 1, 1);
-    if(!ele || !net || !ten)
-        return NULL;
-
-    // check input
-    n = ele->dimensions[0];
-    x = (unsigned int *) net->data;
-    if(n != x[0] - 1) {
-        PyErr_SetString(PyExc_IndexError, "elevation measures do not match with the flow network.");
-        return NULL;
-    }
-    if(x[n] != net->dimensions[0]) {
-        PyErr_SetString(PyExc_IndexError, "corrupted network format for the flow network.");
-        return NULL;
-    }
-    x = (unsigned int *) ten->data;
-    if(x[n] != ten->dimensions[0]) {
-        PyErr_SetString(PyExc_IndexError, "corrupted network format for the reverse flow network.");
-        return NULL;
-    }
-    new = linksinksr((unsigned int *)net->data, (unsigned int *)ten->data, (double *)ele->data);
-    Py_DECREF(ele);
-    Py_DECREF(net);
-    Py_DECREF(ten);
-    return PyArray_Return(new);
-}
-
-static PyObject *
 DemNets_Slopes(PyObject *self, PyObject* args) {
     PyObject *xarg, *yarg, *zarg, *netarg;
     PyArrayObject *x, *y, *z;
@@ -2106,6 +1864,64 @@ static PyObject *
 DemNets_Throughput(PyObject *self, PyObject* args) {
     PyObject *netarg, *lwarg, *nwarg;
     PyArrayObject *wlinks, *wnodes, *net, *t;
+    unsigned int *e, n, i;
+    npy_intp *dim;
+    double *w;
+
+    // parse input
+    nwarg = NULL;
+    if(!PyArg_ParseTuple(args, "OO|O", &netarg, &lwarg, &nwarg))
+        return NULL;
+    net = (PyArrayObject *) PyArray_ContiguousFromObject(netarg, PyArray_UINT, 1, 1);
+    wlinks = (PyArrayObject *) PyArray_ContiguousFromObject(lwarg, PyArray_DOUBLE, 1, 1);
+    if(!net || !wlinks)
+        return NULL;
+    if(!nwarg) {
+        e = (unsigned int *) net->data;
+        dim = malloc(sizeof(npy_intp));
+        n = e[0] - 1;
+        dim[0] = n;
+        wnodes = (PyArrayObject *) PyArray_ZEROS(1, dim, PyArray_DOUBLE, 0);
+        free(dim);
+        w = (double *) wnodes->data;
+        for(i = 0; i < n; i++)
+            w[i] = 1.0;
+    } else {
+        wnodes = (PyArrayObject *) PyArray_ContiguousFromObject(nwarg, PyArray_DOUBLE, 1, 1);
+    }
+    if(!wnodes)
+        return NULL;
+
+    // check input
+    e = (unsigned int *) net->data;
+    n = e[0] - 1;
+    if(e[n] != net->dimensions[0]) {
+        PyErr_SetString(PyExc_IndexError, "corrupted network format.");
+        return NULL;
+    }
+    if(n != wnodes->dimensions[0]) {
+        PyErr_SetString(PyExc_IndexError, "node-weight array does not match network.");
+        return NULL;
+    }
+    n = e[n] - n - 1;
+    if(n != wlinks->dimensions[0]) {
+        PyErr_SetString(PyExc_IndexError, "link-weight array does not match network.");
+        return NULL;
+    }
+
+    // get node throughput
+    t = throughput(e, (double *)wlinks->data, (double *)wnodes->data);
+
+    Py_DECREF(net);
+    Py_DECREF(wlinks);
+    Py_DECREF(wnodes);
+    return PyArray_Return(t);
+}
+
+static PyObject *
+DemNets_RandomWalkThroughput(PyObject *self, PyObject* args) {
+    PyObject *netarg, *lwarg, *nwarg;
+    PyArrayObject *wlinks, *wnodes, *net, *t;
     unsigned int *e, n, iter, plen;
 
     // parse input
@@ -2115,7 +1931,6 @@ DemNets_Throughput(PyObject *self, PyObject* args) {
         return NULL;
     net = (PyArrayObject *) PyArray_ContiguousFromObject(netarg, PyArray_UINT, 1, 1);
     wlinks = (PyArrayObject *) PyArray_ContiguousFromObject(lwarg, PyArray_DOUBLE, 1, 1);
-//    wnodes = (PyArrayObject *) PyArray_ContiguousFromObject(nwarg, PyArray_DOUBLE, 1, 1);
     if(!net || !wlinks)
         return NULL;
 
@@ -2131,12 +1946,11 @@ DemNets_Throughput(PyObject *self, PyObject* args) {
         return NULL;
     }
 
-    // get node throughput
-    t = throughput(e, (double *)wlinks->data, iter, plen);
+    // get random walk node throughput
+    t = rwthroughput(e, (double *)wlinks->data, iter, plen);
 
     Py_DECREF(net);
     Py_DECREF(wlinks);
-//   Py_DECREF(wnodes);
     return PyArray_Return(t);
 }
 
@@ -2403,7 +2217,6 @@ DemNets_SinkDistance(PyObject *self, PyObject* args) {
 }
 
 static PyMethodDef DemNets_methods[] = {
-    {"Betweenness", DemNets_Betweenness, METH_VARARGS, "..."},
     {"Components", DemNets_Components, METH_VARARGS, "..."},
     {"Derivatives", DemNets_Derivatives, METH_VARARGS, "..."},
     {"FuseNetworks", DemNets_FuseNetworks, METH_VARARGS, "..."},
@@ -2415,7 +2228,6 @@ static PyMethodDef DemNets_methods[] = {
     {"Slopes", DemNets_Slopes, METH_VARARGS, "..."},
     {"SinkDistance", DemNets_SinkDistance, METH_VARARGS, "..."},
     {"LinkSinks", DemNets_LinkSinks, METH_VARARGS, "..."},
-    {"LinkSinks_r", DemNets_LinkSinks_r, METH_VARARGS, "..."},
     {"RandomWalk", DemNets_RandomWalk, METH_VARARGS, "..."},
     {"RandomWalks", DemNets_RandomWalks, METH_VARARGS, "..."},
     {"RemoveLinks", DemNets_RemoveLinks, METH_VARARGS, "..."},
@@ -2423,6 +2235,7 @@ static PyMethodDef DemNets_methods[] = {
     {"Revisits", DemNets_Revisits, METH_VARARGS, "..."},
     {"AveragePathLengths", DemNets_AveragePathLengths, METH_VARARGS, "..."},
     {"Throughput", DemNets_Throughput, METH_VARARGS, "..."},
+    {"RandomWalkThroughput", DemNets_RandomWalkThroughput, METH_VARARGS, "..."},
     {NULL, NULL, 0, NULL}
 };
 
