@@ -227,6 +227,82 @@ linklengths(const double *x,
     return lln;
 }
 
+static PyArrayObject *
+linkangles(const double *x,
+           const double *y,
+           const unsigned int *net) {
+    PyArrayObject *phi;
+    npy_intp *dim;
+    unsigned int i, j, k, n;
+    double *p;
+    double dx, dy;
+    double xi, yi;
+
+    // alloc numpy array
+    n = net[0] - 1;
+    dim = malloc(sizeof(npy_intp));
+    dim[0] = net[n] - n - 1;
+    phi = (PyArrayObject *) PyArray_ZEROS(1, dim, PyArray_DOUBLE, 0);
+    free(dim);
+    if(!phi) {
+        PyErr_SetString(PyExc_MemoryError, "...");
+        return NULL;
+    }
+    p = (double *) phi->data;
+
+    // estimate link i->j angular directions
+    for(i = 0; i < n; i++) {
+        xi = x[i];
+        yi = y[i];
+        for(k = net[i]; k < net[i+1]; k++) {
+            j = net[k];
+            dx = xi - x[j];
+            dy = yi - y[j];
+            p[k - n - 1] = atan2(dy, dx);
+        }
+    }
+    return phi;
+}
+
+static PyArrayObject *
+voronoi(const unsigned int *net,
+        const unsigned int *ten,
+        const double *x,
+        const double *y) {
+    PyArrayObject *area;
+    npy_intp *dim;
+    unsigned int i, j, k, n;
+    double *a;
+    double dx, dy;
+    double xi, yi;
+
+    // alloc numpy array
+    n = net[0] - 1;
+    dim = malloc(sizeof(npy_intp));
+    dim[0] = n;
+    area = (PyArrayObject *) PyArray_ZEROS(1, dim, PyArray_DOUBLE, 0);
+    free(dim);
+    if(!area) {
+        PyErr_SetString(PyExc_MemoryError, "...");
+        return NULL;
+    }
+    a = (double *) area->data;
+
+    for(i = 0; i < n; i++) {
+        xi = x[i];
+        yi = y[i];
+        //zi = z[i];
+        for(k = net[i]; k < net[i+1]; k++) {
+            j = net[k];
+            dx = xi - x[j];
+            dy = yi - y[j];
+            //dz = zi - z[j];
+            //l[k - n - 1] = sqrt(dx*dx + dy*dy);
+        }
+    }
+    return area;
+}
+
 static PyObject *
 linksinks(const unsigned int *net,
           const unsigned int *ten,
@@ -577,45 +653,101 @@ static PyArrayObject *
 gridnetwork(const double *z,
             const unsigned int xn,
             const unsigned int yn,
-            const unsigned int flow) {
+            const unsigned int flow,
+            const unsigned int halo) {
     PyArrayObject *net;
     npy_intp *dim;
     unsigned int *gn, x, y;
     unsigned int i, n, m;
+    int u, v, w;
+    int uu, ud, vl, vr;
     double h;
 
     n = xn * yn;
-    gn = malloc(n * 5 * sizeof(unsigned int));
+    gn = malloc(n * (2*halo+1) * (2*halo+1) * sizeof(unsigned int));
     if(!gn) {
         PyErr_SetString(PyExc_MemoryError, "...");
         return NULL;
     }
     m = n + 1;
-    for(x = 0; x < xn; x++)
-        gn[x] = m;
     if(flow) {
-        for(y = 1; y < yn - 1; y++) {
-            gn[y * xn] = m;
-            for(x = 1; x < xn - 1; x++) {
+        for(y = 0; y < yn; y++) {
+            if(y < halo)
+                uu = -y;
+            else
+                uu = -halo;
+            if(y >= yn - halo)
+                ud = yn - y;
+            else
+                ud = halo + 1;
+            for(x = 0; x < xn; x++) {
+                if(x < halo)
+                    vl = -x;
+                else
+                    vl = -halo;
+                if(x >= xn - halo)
+                    vr = xn - x;
+                else
+                    vr = halo + 1;
                 i = y * xn + x;
                 gn[i] = m;
                 h = z[i];
                 if(h < MINELEVATION)
                     continue;
-                if(MINELEVATION < z[i - xn] && z[i - xn] < h)
+                for(u = uu; u < ud; u++) {
+                    for(v = vl; v < vr; v++) {
+                        if(sqrt(u*u + v*v) > (double)halo) continue;
+                        w = i + u * xn + v;
+                        if(MINELEVATION < z[w] && z[w] < h && w != i)
+                            gn[m++] = w;
+                    }
+                }
+            }
+        }
+        gn[n] = m;
+    } else {
+        i = 0;
+        gn[i] = m;
+        h = z[i];
+        if(h > MINELEVATION) {
+            if(z[i + 1] >= h)
+                gn[m++] = i + 1;
+            if(z[i + xn] >= h)
+                gn[m++] = i + xn;
+        }
+        for(i = 1; i < xn - 1; i++) {
+            gn[i] = m;
+            h = z[i];
+            if(h < MINELEVATION)
+                continue;
+            if(z[i - 1] >= h)
+                gn[m++] = i - 1;
+            if(z[i + 1] >= h)
+                gn[m++] = i + 1;
+            if(z[i + xn] >= h)
+                gn[m++] = i + xn;
+        }
+        i = xn - 1;
+        gn[i] = m;
+        h = z[i];
+        if(h > MINELEVATION) {
+            if(z[i - 1] >= h)
+                gn[m++] = i - 1;
+            if(z[i + xn] >= h)
+                gn[m++] = i + xn;
+        }
+        for(y = 1; y < yn - 1; y++) {
+            i = y * xn;
+            gn[i] = m;
+            h = z[i];
+            if(h > MINELEVATION) {
+                if(z[i - xn] >= h)
                     gn[m++] = i - xn;
-                if(MINELEVATION < z[i - 1] && z[i - 1] < h)
-                    gn[m++] = i - 1;
-                if(MINELEVATION < z[i + 1] && z[i + 1] < h)
+                if(z[i + 1] >= h)
                     gn[m++] = i + 1;
-                if(MINELEVATION < z[i + xn] && z[i + xn] < h)
+                if(z[i + xn] >= h)
                     gn[m++] = i + xn;
             }
-            gn[y * xn + xn - 1] = m;
-        }
-    } else {
-        for(y = 1; y < yn - 1; y++) {
-            gn[y * xn] = m;
             for(x = 1; x < xn - 1; x++) {
                 i = y * xn + x;
                 gn[i] = m;
@@ -631,12 +763,255 @@ gridnetwork(const double *z,
                 if(z[i + xn] >= h)
                     gn[m++] = i + xn;
             }
-            gn[y * xn + xn - 1] = m;
+            i = y * xn + xn - 1;
+            gn[i] = m;
+            h = z[i];
+            if(h > MINELEVATION) {
+                if(z[i - xn] >= h)
+                    gn[m++] = i - xn;
+                if(z[i - 1] >= h)
+                    gn[m++] = i - 1;
+                if(z[i + xn] >= h)
+                    gn[m++] = i + xn;
+            }
         }
+        i = n - xn;
+        gn[i] = m;
+        h = z[i];
+        if(h > MINELEVATION) {
+            if(z[i - xn] >= h)
+                gn[m++] = i - xn;
+            if(z[i + 1] >= h)
+                gn[m++] = i + 1;
+        }
+        for(i = n - xn + 1; i < n - 1; i++) {
+            gn[i] = m;
+            h = z[i];
+            if(h < MINELEVATION)
+                continue;
+            if(z[i - xn] >= h)
+                gn[m++] = i - xn;
+            if(z[i - 1] >= h)
+                gn[m++] = i - 1;
+            if(z[i + 1] >= h)
+                gn[m++] = i + 1;
+        }
+        i = n - 1;
+        gn[i] = m;
+        h = z[i];
+        if(h > MINELEVATION) {
+            if(z[i - xn] >= h)
+                gn[m++] = i - xn;
+            if(z[i - 1] >= h)
+                gn[m++] = i - 1;
+        }
+        gn[n] = m;
     }
-    for(x = n - xn; x <= n; x++)
-        gn[x] = m;
-
+/*
+    if(flow) {
+        i = 0;
+        gn[i] = m;
+        h = z[i];
+        if(h > MINELEVATION) {
+            if(MINELEVATION < z[i + 1] && z[i + 1] < h)
+                gn[m++] = i + 1;
+            if(MINELEVATION < z[i + xn] && z[i + xn] < h)
+                gn[m++] = i + xn;
+        }
+        for(i = 1; i < xn - 1; i++) {
+            gn[i] = m;
+            h = z[i];
+            if(h < MINELEVATION)
+                continue;
+            if(MINELEVATION < z[i - 1] && z[i - 1] < h)
+                gn[m++] = i - 1;
+            if(MINELEVATION < z[i + 1] && z[i + 1] < h)
+                gn[m++] = i + 1;
+            if(MINELEVATION < z[i + xn] && z[i + xn] < h)
+                gn[m++] = i + xn;
+        }
+        i = xn - 1;
+        gn[i] = m;
+        h = z[i];
+        if(h > MINELEVATION) {
+            if(MINELEVATION < z[i - 1] && z[i - 1] < h)
+                gn[m++] = i - 1;
+            if(MINELEVATION < z[i + xn] && z[i + xn] < h)
+                gn[m++] = i + xn;
+        }
+        for(y = 1; y < yn - 1; y++) {
+            i = y * xn;
+            gn[i] = m;
+            h = z[i];
+            if(h > MINELEVATION) {
+                if(MINELEVATION < z[i - xn] && z[i - xn] < h)
+                    gn[m++] = i - xn;
+                if(MINELEVATION < z[i + 1] && z[i + 1] < h)
+                    gn[m++] = i + 1;
+                if(MINELEVATION < z[i + xn] && z[i + xn] < h)
+                    gn[m++] = i + xn;
+            }
+            for(x = 1; x < xn - 1; x++) {
+                i = y * xn + x;
+                gn[i] = m;
+                h = z[i];
+                if(h < MINELEVATION)
+                    continue;
+                if(MINELEVATION < z[i - xn] && z[i - xn] < h)
+                    gn[m++] = i - xn;
+                if(MINELEVATION < z[i - 1] && z[i - 1] < h)
+                    gn[m++] = i - 1;
+                if(MINELEVATION < z[i + 1] && z[i + 1] < h)
+                    gn[m++] = i + 1;
+                if(MINELEVATION < z[i + xn] && z[i + xn] < h)
+                    gn[m++] = i + xn;
+            }
+            i = y * xn + xn - 1;
+            gn[i] = m;
+            h = z[i];
+            if(h > MINELEVATION) {
+                if(MINELEVATION < z[i - xn] && z[i - xn] < h)
+                    gn[m++] = i - xn;
+                if(MINELEVATION < z[i - 1] && z[i - 1] < h)
+                    gn[m++] = i - 1;
+                if(MINELEVATION < z[i + xn] && z[i + xn] < h)
+                    gn[m++] = i + xn;
+            }
+        }
+        i = n - xn;
+        gn[i] = m;
+        h = z[i];
+        if(h > MINELEVATION) {
+            if(MINELEVATION < z[i - xn] && z[i - xn] < h)
+                gn[m++] = i - xn;
+            if(MINELEVATION < z[i + 1] && z[i + 1] < h)
+                gn[m++] = i + 1;
+        }
+        for(i = n - xn + 1; i < n - 1; i++) {
+            gn[i] = m;
+            h = z[i];
+            if(h < MINELEVATION)
+                continue;
+            if(MINELEVATION < z[i - xn] && z[i - xn] < h)
+                gn[m++] = i - xn;
+            if(MINELEVATION < z[i - 1] && z[i - 1] < h)
+                gn[m++] = i - 1;
+            if(MINELEVATION < z[i + 1] && z[i + 1] < h)
+                gn[m++] = i + 1;
+        }
+        i = n - 1;
+        gn[i] = m;
+        h = z[i];
+        if(h > MINELEVATION) {
+            if(MINELEVATION < z[i - xn] && z[i - xn] < h)
+                gn[m++] = i - xn;
+            if(MINELEVATION < z[i - 1] && z[i - 1] < h)
+                gn[m++] = i - 1;
+        }
+        gn[n] = m;
+    } else {
+        i = 0;
+        gn[i] = m;
+        h = z[i];
+        if(h > MINELEVATION) {
+            if(z[i + 1] >= h)
+                gn[m++] = i + 1;
+            if(z[i + xn] >= h)
+                gn[m++] = i + xn;
+        }
+        for(i = 1; i < xn - 1; i++) {
+            gn[i] = m;
+            h = z[i];
+            if(h < MINELEVATION)
+                continue;
+            if(z[i - 1] >= h)
+                gn[m++] = i - 1;
+            if(z[i + 1] >= h)
+                gn[m++] = i + 1;
+            if(z[i + xn] >= h)
+                gn[m++] = i + xn;
+        }
+        i = xn - 1;
+        gn[i] = m;
+        h = z[i];
+        if(h > MINELEVATION) {
+            if(z[i - 1] >= h)
+                gn[m++] = i - 1;
+            if(z[i + xn] >= h)
+                gn[m++] = i + xn;
+        }
+        for(y = 1; y < yn - 1; y++) {
+            i = y * xn;
+            gn[i] = m;
+            h = z[i];
+            if(h > MINELEVATION) {
+                if(z[i - xn] >= h)
+                    gn[m++] = i - xn;
+                if(z[i + 1] >= h)
+                    gn[m++] = i + 1;
+                if(z[i + xn] >= h)
+                    gn[m++] = i + xn;
+            }
+            for(x = 1; x < xn - 1; x++) {
+                i = y * xn + x;
+                gn[i] = m;
+                h = z[i];
+                if(h < MINELEVATION)
+                    continue;
+                if(z[i - xn] >= h)
+                    gn[m++] = i - xn;
+                if(z[i - 1] >= h)
+                    gn[m++] = i - 1;
+                if(z[i + 1] >= h)
+                    gn[m++] = i + 1;
+                if(z[i + xn] >= h)
+                    gn[m++] = i + xn;
+            }
+            i = y * xn + xn - 1;
+            gn[i] = m;
+            h = z[i];
+            if(h > MINELEVATION) {
+                if(z[i - xn] >= h)
+                    gn[m++] = i - xn;
+                if(z[i - 1] >= h)
+                    gn[m++] = i - 1;
+                if(z[i + xn] >= h)
+                    gn[m++] = i + xn;
+            }
+        }
+        i = n - xn;
+        gn[i] = m;
+        h = z[i];
+        if(h > MINELEVATION) {
+            if(z[i - xn] >= h)
+                gn[m++] = i - xn;
+            if(z[i + 1] >= h)
+                gn[m++] = i + 1;
+        }
+        for(i = n - xn + 1; i < n - 1; i++) {
+            gn[i] = m;
+            h = z[i];
+            if(h < MINELEVATION)
+                continue;
+            if(z[i - xn] >= h)
+                gn[m++] = i - xn;
+            if(z[i - 1] >= h)
+                gn[m++] = i - 1;
+            if(z[i + 1] >= h)
+                gn[m++] = i + 1;
+        }
+        i = n - 1;
+        gn[i] = m;
+        h = z[i];
+        if(h > MINELEVATION) {
+            if(z[i - xn] >= h)
+                gn[m++] = i - xn;
+            if(z[i - 1] >= h)
+                gn[m++] = i - 1;
+        }
+        gn[n] = m;
+    }
+*/
     // alloc numpy array
     dim = malloc(sizeof(npy_intp));
     dim[0] = m;
@@ -902,14 +1277,17 @@ rwthroughput(const unsigned int *net,
 
 static PyArrayObject *
 throughput(const unsigned int *net,
+           const double *nw,
            const double *lw,
-           const double *nw) {
+           const double *ld,
+           const double *phi) {
     PyArrayObject *tput;
     npy_intp *dim;
-    unsigned int i, j, k;
+    unsigned int i, k;
     unsigned int n, *c;
     unsigned int *seen;
-    double *t, ltp, lws;
+    double *t, ltp, lws, lds, psum;
+    double xtp, ytp;
     Queue *que;
 
     // alloc numpy array for output
@@ -931,43 +1309,59 @@ throughput(const unsigned int *net,
         PyErr_SetString(PyExc_MemoryError, "...");
         return NULL;
     }
-
-    for(i = 0 ; i < n ; i++)
+    
+	// in-degree c
+    for(i = 0 ; i < n ; i++) {
         for(k = net[i]; k < net[i+1]; k++)
             c[net[k]]++;
+    }
     que->first = que->last = NULL;
     for(i = 0 ; i < n ; i++) {
         // hill tops
         if(!c[i] && net[i] < net[i+1]) {
-            t[i] = nw[i];
-            lws = 0;
-            for(k = net[i]; k < net[i+1]; k++)
-                lws += lw[k - n - 1];
+            lws = lds = psum = 0;
             for(k = net[i]; k < net[i+1]; k++) {
-                j = net[k];
-                // put children of hill tops into queue
-                if(put(que, j, lw[k-n-1] * t[i] / lws)) {
+                lws += lw[k - n - 1];
+                lds += ld[k - n - 1];
+            }
+            for(k = net[i]; k < net[i+1]; k++)
+                psum += lw[k - n - 1] * ld[k - n - 1] / lws / lds;
+            xtp = ytp = 0;
+            for(k = net[i]; k < net[i+1]; k++) {
+                ltp = nw[i] * lw[k-n-1] / lws;
+                // put children j = net[k] of hill tops i into queue
+                if(put(que, net[k], ltp)) {
                     PyErr_SetString(PyExc_MemoryError, "failed to fill queue ..");
                     exit(EXIT_FAILURE);
                 }
+                xtp += ltp * cos(phi[k-n-1]) / ld[k-n-1];
+                ytp += ltp * sin(phi[k-n-1]) / ld[k-n-1];
             }
+            t[i] = sqrt(xtp*xtp + ytp*ytp);
             seen[i] = 1;
         }
     }
     while(!get(que, &i, &ltp)) {
         t[i] += ltp;
         if(seen[i] == c[i] - 1) {
-            t[i] += nw[i];
-            lws = 0;
-            for(k = net[i]; k < net[i+1]; k++)
-                lws += lw[k - n - 1];
+            lws = lds = psum = 0;
             for(k = net[i]; k < net[i+1]; k++) {
-                j = net[k];
-                if(put(que, j, lw[k-n-1] * t[i] / lws)) {
+                lws += lw[k - n - 1];
+                lds += ld[k - n - 1];
+            }
+            for(k = net[i]; k < net[i+1]; k++)
+                psum += lw[k - n - 1] * ld[k - n - 1] / lws / lds;
+            xtp = ytp = 0;
+            for(k = net[i]; k < net[i+1]; k++) {
+                ltp = (t[i] + nw[i]) * lw[k-n-1] / lws;
+                if(put(que, net[k], ltp)) {
                     PyErr_SetString(PyExc_MemoryError, "failed to fill queue ..");
                     exit(EXIT_FAILURE);
                 }
+                xtp += ltp * cos(phi[k-n-1]) / ld[k-n-1];
+                ytp += ltp * sin(phi[k-n-1]) / ld[k-n-1];
             }
+            t[i] = sqrt(xtp*xtp + ytp*ytp);
         }
         seen[i]++;
     }
@@ -1584,6 +1978,47 @@ DemNets_LinkLengths(PyObject *self, PyObject* args) {
 }
 
 static PyObject *
+DemNets_LinkAngles(PyObject *self, PyObject* args) {
+    PyObject *xarg, *yarg, *netarg;
+    PyArrayObject *x, *y;
+    PyArrayObject *net, *phi;
+    unsigned int *e, n;
+
+    // parse input
+    if(!PyArg_ParseTuple(args, "OOO", &xarg, &yarg, &netarg))
+        return NULL;
+    x = (PyArrayObject *) PyArray_ContiguousFromObject(xarg, PyArray_DOUBLE, 1, 1);
+    y = (PyArrayObject *) PyArray_ContiguousFromObject(yarg, PyArray_DOUBLE, 1, 1);
+    net = (PyArrayObject *) PyArray_ContiguousFromObject(netarg, PyArray_UINT, 1, 1);
+    if(!x || !y || !net)
+        return NULL;
+
+    // check input
+    n = x->dimensions[0];
+    if(n != y->dimensions[0]) {
+        PyErr_SetString(PyExc_IndexError, "(x, y) not of the same dimension.");
+        return NULL;
+    }
+    e = (unsigned int *) net->data;
+    if(n != e[0] - 1) {
+        PyErr_SetString(PyExc_IndexError, "(x, y) does not match with the network.");
+        return NULL;
+    }
+    if(e[n] != net->dimensions[0]) {
+        PyErr_SetString(PyExc_IndexError, "corrupted network format.");
+        return NULL;
+    }
+
+    // get link direction angles phi = atan2(y, x)
+    phi = linkangles((double *)x->data, (double *)y->data, e);
+
+    Py_DECREF(x);
+    Py_DECREF(y);
+    Py_DECREF(net);
+    return PyArray_Return(phi);
+}
+
+static PyObject *
 DemNets_FuseNetworks(PyObject *self, PyObject* args) {
     PyObject *a, *b;
     PyArrayObject *u, *v, *w;
@@ -1685,18 +2120,18 @@ static PyObject *
 DemNets_FlowNetworkFromGrid(PyObject *self, PyObject* args) {
     PyObject *elearg;
     PyArrayObject *ele, *net;
-    unsigned int flow;
+    unsigned int flow, halo;
 
     // parse input
-    flow = 1;
-    if(!PyArg_ParseTuple(args, "O|I", &elearg, &flow))
+    flow = halo = 1;
+    if(!PyArg_ParseTuple(args, "O|II", &elearg, &flow, &halo))
         return NULL;
     ele = (PyArrayObject *) PyArray_ContiguousFromObject(elearg, PyArray_DOUBLE, 2, 2);
     if(!ele)
         return NULL;
 
     // retrieve flow network from elevation grid
-    net = gridnetwork((double *)ele->data, ele->dimensions[1], ele->dimensions[0], flow);
+    net = gridnetwork((double *)ele->data, ele->dimensions[1], ele->dimensions[0], flow, halo);
     Py_DECREF(ele);
     return PyArray_Return(net);
 }
@@ -1744,6 +2179,46 @@ DemNets_LinkSinks(PyObject *self, PyObject* args) {
     Py_DECREF(net);
     Py_DECREF(ten);
     return obj;
+}
+
+static PyObject *
+DemNets_VoronoiArea(PyObject *self, PyObject* args) {
+    PyObject *xarg, *yarg, *netarg, *tenarg;
+    PyArrayObject *x, *y, *net, *ten, *area;
+    unsigned int *e, n;
+
+    // parse input
+    if(!PyArg_ParseTuple(args, "OOOO", &netarg, &tenarg, &xarg, &yarg))
+        return NULL;
+    net = (PyArrayObject *) PyArray_ContiguousFromObject(netarg, PyArray_UINT, 1, 1);
+    ten = (PyArrayObject *) PyArray_ContiguousFromObject(tenarg, PyArray_UINT, 1, 1);
+    x = (PyArrayObject *) PyArray_ContiguousFromObject(xarg, PyArray_DOUBLE, 1, 1);
+    y = (PyArrayObject *) PyArray_ContiguousFromObject(yarg, PyArray_DOUBLE, 1, 1);
+    if(!net || !ten || !x || !y)
+        return NULL;
+
+    // check input
+    n = x->dimensions[0];
+    e = (unsigned int *) net->data;
+    if(n != e[0] - 1) {
+        PyErr_SetString(PyExc_IndexError, "coordinates do not match with the networks.");
+        return NULL;
+    }
+    if(e[n] != net->dimensions[0]) {
+        PyErr_SetString(PyExc_IndexError, "corrupted network format for the flow network.");
+        return NULL;
+    }
+    e = (unsigned int *) ten->data;
+    if(e[n] != ten->dimensions[0]) {
+        PyErr_SetString(PyExc_IndexError, "corrupted network format for the reverse flow network.");
+        return NULL;
+    }
+    area = voronoi((unsigned int *)net->data, (unsigned int *)ten->data, (double *)x->data, (double *)y->data);
+    Py_DECREF(x);
+    Py_DECREF(y);
+    Py_DECREF(net);
+    Py_DECREF(ten);
+    return PyArray_Return(area);
 }
 
 static PyObject *
@@ -1862,34 +2337,36 @@ DemNets_ReverseLinks(PyObject *self, PyObject* args) {
 
 static PyObject *
 DemNets_Throughput(PyObject *self, PyObject* args) {
-    PyObject *netarg, *lwarg, *nwarg;
-    PyArrayObject *wlinks, *wnodes, *net, *t;
+    PyObject *phiarg, *netarg, *ldarg, *lwarg, *nwarg;
+    PyArrayObject *phi, *ld, *lw, *nw, *net, *t;
     unsigned int *e, n, i;
     npy_intp *dim;
     double *w;
 
     // parse input
     nwarg = NULL;
-    if(!PyArg_ParseTuple(args, "OO|O", &netarg, &lwarg, &nwarg))
+    if(!PyArg_ParseTuple(args, "OOOO|O", &netarg, &lwarg, &ldarg, &phiarg, &nwarg))
         return NULL;
     net = (PyArrayObject *) PyArray_ContiguousFromObject(netarg, PyArray_UINT, 1, 1);
-    wlinks = (PyArrayObject *) PyArray_ContiguousFromObject(lwarg, PyArray_DOUBLE, 1, 1);
-    if(!net || !wlinks)
+    lw = (PyArrayObject *) PyArray_ContiguousFromObject(lwarg, PyArray_DOUBLE, 1, 1);
+    ld = (PyArrayObject *) PyArray_ContiguousFromObject(ldarg, PyArray_DOUBLE, 1, 1);
+    phi = (PyArrayObject *) PyArray_ContiguousFromObject(phiarg, PyArray_DOUBLE, 1, 1);
+    if(!net || !lw || !ld || !phi)
         return NULL;
     if(!nwarg) {
         e = (unsigned int *) net->data;
         dim = malloc(sizeof(npy_intp));
         n = e[0] - 1;
         dim[0] = n;
-        wnodes = (PyArrayObject *) PyArray_ZEROS(1, dim, PyArray_DOUBLE, 0);
+        nw = (PyArrayObject *) PyArray_ZEROS(1, dim, PyArray_DOUBLE, 0);
         free(dim);
-        w = (double *) wnodes->data;
+        w = (double *) nw->data;
         for(i = 0; i < n; i++)
             w[i] = 1.0;
     } else {
-        wnodes = (PyArrayObject *) PyArray_ContiguousFromObject(nwarg, PyArray_DOUBLE, 1, 1);
+        nw = (PyArrayObject *) PyArray_ContiguousFromObject(nwarg, PyArray_DOUBLE, 1, 1);
     }
-    if(!wnodes)
+    if(!nw)
         return NULL;
 
     // check input
@@ -1899,22 +2376,32 @@ DemNets_Throughput(PyObject *self, PyObject* args) {
         PyErr_SetString(PyExc_IndexError, "corrupted network format.");
         return NULL;
     }
-    if(n != wnodes->dimensions[0]) {
+    if(n != nw->dimensions[0]) {
         PyErr_SetString(PyExc_IndexError, "node-weight array does not match network.");
         return NULL;
     }
     n = e[n] - n - 1;
-    if(n != wlinks->dimensions[0]) {
+    if(n != lw->dimensions[0]) {
         PyErr_SetString(PyExc_IndexError, "link-weight array does not match network.");
+        return NULL;
+    }
+    if(n != ld->dimensions[0]) {
+        PyErr_SetString(PyExc_IndexError, "link-width array does not match network.");
+        return NULL;
+    }
+    if(n != phi->dimensions[0]) {
+        PyErr_SetString(PyExc_IndexError, "link-angle array does not match network.");
         return NULL;
     }
 
     // get node throughput
-    t = throughput(e, (double *)wlinks->data, (double *)wnodes->data);
+    t = throughput(e, (double *)nw->data, (double *)lw->data, (double *)ld->data, (double *)phi->data);
 
     Py_DECREF(net);
-    Py_DECREF(wlinks);
-    Py_DECREF(wnodes);
+    Py_DECREF(nw);
+    Py_DECREF(lw);
+    Py_DECREF(ld);
+    Py_DECREF(phi);
     return PyArray_Return(t);
 }
 
@@ -2224,6 +2711,7 @@ static PyMethodDef DemNets_methods[] = {
     {"FlowNetworkFromGrid", DemNets_FlowNetworkFromGrid, METH_VARARGS, "..."},
     {"FlowDistance", DemNets_FlowDistance, METH_VARARGS, "..."},
     {"LinkLengths", DemNets_LinkLengths, METH_VARARGS, "..."},
+    {"LinkAngles", DemNets_LinkAngles, METH_VARARGS, "..."},
     {"HillSlopeLengths", DemNets_HillSlopeLengths, METH_VARARGS, "..."},
     {"Slopes", DemNets_Slopes, METH_VARARGS, "..."},
     {"SinkDistance", DemNets_SinkDistance, METH_VARARGS, "..."},
@@ -2234,6 +2722,7 @@ static PyMethodDef DemNets_methods[] = {
     {"ReverseLinks", DemNets_ReverseLinks, METH_VARARGS, "..."},
     {"Revisits", DemNets_Revisits, METH_VARARGS, "..."},
     {"AveragePathLengths", DemNets_AveragePathLengths, METH_VARARGS, "..."},
+    {"VoronoiArea", DemNets_VoronoiArea, METH_VARARGS, "..."},
     {"Throughput", DemNets_Throughput, METH_VARARGS, "..."},
     {"RandomWalkThroughput", DemNets_RandomWalkThroughput, METH_VARARGS, "..."},
     {NULL, NULL, 0, NULL}
