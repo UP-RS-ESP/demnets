@@ -234,8 +234,7 @@ linkangles(const double *x,
     PyArrayObject *phi;
     npy_intp *dim;
     unsigned int i, j, k, n;
-    double *p;
-    double dx, dy;
+    double *ph;
     double xi, yi;
 
     // alloc numpy array
@@ -248,7 +247,7 @@ linkangles(const double *x,
         PyErr_SetString(PyExc_MemoryError, "...");
         return NULL;
     }
-    p = (double *) phi->data;
+    ph = (double *) phi->data;
 
     // estimate link i->j angular directions
     for(i = 0; i < n; i++) {
@@ -256,9 +255,7 @@ linkangles(const double *x,
         yi = y[i];
         for(k = net[i]; k < net[i+1]; k++) {
             j = net[k];
-            dx = xi - x[j];
-            dy = yi - y[j];
-            p[k - n - 1] = atan2(dy, dx);
+            ph[k - n - 1] = atan2(y[j] - yi, x[j] - xi);
         }
     }
     return phi;
@@ -1275,39 +1272,27 @@ rwthroughput(const unsigned int *net,
     return tput;
 }
 
-static PyArrayObject *
+void
 throughput(const unsigned int *net,
+           double *rho, double *phi,
            const double *nw,
            const double *lw,
            const double *ld,
-           const double *phi) {
-    PyArrayObject *tput;
-    npy_intp *dim;
+           const double *theta) {
     unsigned int i, k;
     unsigned int n, *c;
     unsigned int *seen;
-    double *t, ltp, lws, lds, psum;
+    double ltp, lws, lds, psum;
     double xtp, ytp;
     Queue *que;
 
-    // alloc numpy array for output
     n = net[0] - 1;
-    dim = malloc(sizeof(npy_intp));
-    dim[0] = n;
-    tput = (PyArrayObject *) PyArray_ZEROS(1, dim, PyArray_DOUBLE, 0);
-    free(dim);
-    if(!tput) {
-        PyErr_SetString(PyExc_MemoryError, "...");
-        return NULL;
-    }
-    t = (double *) tput->data;
-
     seen = calloc(n, sizeof(unsigned int));
     que = malloc(sizeof(Queue));
     c = calloc(n, sizeof(unsigned int));
     if(!c || !que || !seen) {
         PyErr_SetString(PyExc_MemoryError, "...");
-        return NULL;
+        exit(EXIT_FAILURE);
     }
     
 	// in-degree c
@@ -1321,54 +1306,157 @@ throughput(const unsigned int *net,
         if(!c[i] && net[i] < net[i+1]) {
             lws = lds = psum = 0;
             for(k = net[i]; k < net[i+1]; k++) {
-                lws += lw[k - n - 1];
-                lds += ld[k - n - 1];
+                lws += lw[k-n-1];
+                lds += ld[k-n-1];
             }
             for(k = net[i]; k < net[i+1]; k++)
-                psum += lw[k - n - 1] * ld[k - n - 1] / lws / lds;
+                psum += lw[k-n-1] * ld[k-n-1];
             xtp = ytp = 0;
             for(k = net[i]; k < net[i+1]; k++) {
-                ltp = nw[i] * lw[k-n-1] / lws;
+                //ltp = nw[i] * lw[k-n-1] * ld[k-n-1] / lws / lds / psum;
+                ltp = nw[i] * lw[k-n-1] * ld[k-n-1] / psum;
+                //ltp = nw[i] * lw[k-n-1] / lws;
                 // put children j = net[k] of hill tops i into queue
                 if(put(que, net[k], ltp)) {
                     PyErr_SetString(PyExc_MemoryError, "failed to fill queue ..");
                     exit(EXIT_FAILURE);
                 }
-                xtp += ltp * cos(phi[k-n-1]) / ld[k-n-1];
-                ytp += ltp * sin(phi[k-n-1]) / ld[k-n-1];
+                xtp += ltp * cos(theta[k-n-1]) / ld[k-n-1];
+                ytp += ltp * sin(theta[k-n-1]) / ld[k-n-1];
             }
-            t[i] = sqrt(xtp*xtp + ytp*ytp);
+            rho[i] = sqrt(xtp*xtp + ytp*ytp);
+            phi[i] = atan2(ytp, xtp);
             seen[i] = 1;
         }
     }
     while(!get(que, &i, &ltp)) {
-        t[i] += ltp;
+        rho[i] += ltp;
         if(seen[i] == c[i] - 1) {
             lws = lds = psum = 0;
             for(k = net[i]; k < net[i+1]; k++) {
-                lws += lw[k - n - 1];
-                lds += ld[k - n - 1];
+                lws += lw[k-n-1];
+                lds += ld[k-n-1];
             }
             for(k = net[i]; k < net[i+1]; k++)
-                psum += lw[k - n - 1] * ld[k - n - 1] / lws / lds;
+                psum += lw[k-n-1] * ld[k-n-1];
             xtp = ytp = 0;
             for(k = net[i]; k < net[i+1]; k++) {
-                ltp = (t[i] + nw[i]) * lw[k-n-1] / lws;
+                //ltp = (rho[i] + nw[i]) * lw[k-n-1] * ld[k-n-1] / lws / lds / psum;
+                ltp = (rho[i] + nw[i]) * lw[k-n-1] * ld[k-n-1] / psum;
+                //ltp = (rho[i] + nw[i]) * lw[k-n-1] / lws;
                 if(put(que, net[k], ltp)) {
                     PyErr_SetString(PyExc_MemoryError, "failed to fill queue ..");
                     exit(EXIT_FAILURE);
                 }
-                xtp += ltp * cos(phi[k-n-1]) / ld[k-n-1];
-                ytp += ltp * sin(phi[k-n-1]) / ld[k-n-1];
+                xtp += ltp * cos(theta[k-n-1]) / ld[k-n-1];
+                ytp += ltp * sin(theta[k-n-1]) / ld[k-n-1];
             }
-            t[i] = sqrt(xtp*xtp + ytp*ytp);
+            //rho[i] = cos(M_PI / 2. + atan2(ytp, xtp) - atan2(y[i], x[i])) * sqrt(xtp*xtp + ytp*ytp);
+            rho[i] = sqrt(xtp*xtp + ytp*ytp);
+            phi[i] = atan2(ytp, xtp);
         }
         seen[i]++;
     }
     free(seen);
     free(que);
     free(c);
-    return tput;
+}
+
+static PyArrayObject *
+linkthroughput(const unsigned int *net,
+           const double *nw,
+           const double *lw,
+           const double *ld) {
+    npy_intp *dim;
+    PyArrayObject *ltput;
+    unsigned int i, j, k;
+    unsigned int n, *c;
+    unsigned int *seen;
+    double buf, lws, lds, psum;
+    double *t, *ltp;
+    Queue *que;
+
+    n = net[0] - 1;
+    seen = calloc(n, sizeof(unsigned int));
+    t = calloc(n, sizeof(double));
+    que = malloc(sizeof(Queue));
+    c = calloc(n, sizeof(unsigned int));
+    dim = malloc(sizeof(npy_intp));
+    dim[0] = net[n] - n - 1;
+    ltput = (PyArrayObject *) PyArray_ZEROS(1, dim, PyArray_DOUBLE, 0);
+    free(dim);
+    ltp = (double *)ltput->data;
+    if(!ltput || !c || !que || !t || !seen) {
+        PyErr_SetString(PyExc_MemoryError, "...");
+        exit(EXIT_FAILURE);
+    }
+    
+	// in-degree c
+    for(i = 0 ; i < n ; i++) {
+        for(k = net[i]; k < net[i+1]; k++)
+            c[net[k]]++;
+    }
+    que->first = que->last = NULL;
+    for(i = 0 ; i < n ; i++) {
+        // hill tops
+        if(!c[i] && net[i] < net[i+1]) {
+            lws = lds = psum = 0;
+            for(k = net[i]; k < net[i+1]; k++) {
+                j = k - n - 1;
+                lws += lw[j];
+                lds += ld[j];
+            }
+            for(k = net[i]; k < net[i+1]; k++) {
+                j = k - n - 1;
+                psum += lw[j] * ld[j] / lws / lds;
+            }
+            for(k = net[i]; k < net[i+1]; k++) {
+                j = k - n - 1;
+                ltp[j] = nw[i] * lw[j] * ld[j] / lws / lds / psum;
+                //ltp[j] = nw[i] * lw[j] * ld[j] / psum;
+                //ltp[j] = nw[i] * lw[j] / lws;
+                // put children j = net[k] of hill tops i into queue
+                if(put(que, net[k], ltp[j])) {
+                    PyErr_SetString(PyExc_MemoryError, "failed to fill queue ..");
+                    exit(EXIT_FAILURE);
+                }
+                ltp[j] /= ld[j];
+            }
+            seen[i] = 1;
+        }
+    }
+    while(!get(que, &i, &buf)) {
+        t[i] += buf;
+        if(seen[i] == c[i] - 1) {
+            lws = lds = psum = 0;
+            for(k = net[i]; k < net[i+1]; k++) {
+                j = k - n - 1;
+                lws += lw[j];
+                lds += ld[j];
+            }
+            for(k = net[i]; k < net[i+1]; k++) {
+                j = k - n - 1;
+                psum += lw[j] * ld[j] / lws / lds;
+            }
+            for(k = net[i]; k < net[i+1]; k++) {
+                j = k - n - 1;
+                ltp[j] = (t[i] + nw[i]) * lw[j] * ld[j] / lws / lds / psum;
+                //ltp[j] = (t[i] + nw[i]) * lw[j] * ld[j] / psum;
+                //ltp[j] = (t[i] + nw[i]) * lw[j] / lws;
+                if(put(que, net[k], ltp[j])) {
+                    PyErr_SetString(PyExc_MemoryError, "failed to fill queue ..");
+                    exit(EXIT_FAILURE);
+                }
+                ltp[j] /= ld[j];
+            }
+        }
+        seen[i]++;
+    }
+    free(seen);
+    free(t);
+    free(que);
+    free(c);
+    return ltput;
 }
 
 static PyArrayObject *
@@ -2337,21 +2425,21 @@ DemNets_ReverseLinks(PyObject *self, PyObject* args) {
 
 static PyObject *
 DemNets_Throughput(PyObject *self, PyObject* args) {
-    PyObject *phiarg, *netarg, *ldarg, *lwarg, *nwarg;
-    PyArrayObject *phi, *ld, *lw, *nw, *net, *t;
+    PyObject *thetaarg, *netarg, *ldarg, *lwarg, *nwarg;
+    PyArrayObject *rho, *phi, *theta, *ld, *lw, *nw, *net;
     unsigned int *e, n, i;
     npy_intp *dim;
-    double *w;
+    double *w, *rh, *ph;
 
     // parse input
     nwarg = NULL;
-    if(!PyArg_ParseTuple(args, "OOOO|O", &netarg, &lwarg, &ldarg, &phiarg, &nwarg))
+    if(!PyArg_ParseTuple(args, "OOOO|O", &netarg, &lwarg, &ldarg, &thetaarg, &nwarg))
         return NULL;
     net = (PyArrayObject *) PyArray_ContiguousFromObject(netarg, PyArray_UINT, 1, 1);
     lw = (PyArrayObject *) PyArray_ContiguousFromObject(lwarg, PyArray_DOUBLE, 1, 1);
     ld = (PyArrayObject *) PyArray_ContiguousFromObject(ldarg, PyArray_DOUBLE, 1, 1);
-    phi = (PyArrayObject *) PyArray_ContiguousFromObject(phiarg, PyArray_DOUBLE, 1, 1);
-    if(!net || !lw || !ld || !phi)
+    theta = (PyArrayObject *) PyArray_ContiguousFromObject(thetaarg, PyArray_DOUBLE, 1, 1);
+    if(!net || !lw || !ld || !theta)
         return NULL;
     if(!nwarg) {
         e = (unsigned int *) net->data;
@@ -2389,20 +2477,85 @@ DemNets_Throughput(PyObject *self, PyObject* args) {
         PyErr_SetString(PyExc_IndexError, "link-width array does not match network.");
         return NULL;
     }
-    if(n != phi->dimensions[0]) {
+    if(n != theta->dimensions[0]) {
         PyErr_SetString(PyExc_IndexError, "link-angle array does not match network.");
         return NULL;
     }
 
+    // allocate output arrays
+    rho = (PyArrayObject *) PyArray_ZEROS(1, nw->dimensions, PyArray_DOUBLE, 0);
+    phi = (PyArrayObject *) PyArray_ZEROS(1, nw->dimensions, PyArray_DOUBLE, 0);
+    if(!rho || !phi) {
+        PyErr_SetString(PyExc_MemoryError,
+        "Cannot allocate enough memory for output.");
+        return NULL;
+    }
+
     // get node throughput
-    t = throughput(e, (double *)nw->data, (double *)lw->data, (double *)ld->data, (double *)phi->data);
+    rh = (double *)rho->data;
+    ph = (double *)phi->data;
+    throughput(e, rh, ph,
+            (double *)nw->data,
+            (double *)lw->data,
+            (double *)ld->data,
+            (double *)theta->data);
 
     Py_DECREF(net);
     Py_DECREF(nw);
     Py_DECREF(lw);
     Py_DECREF(ld);
-    Py_DECREF(phi);
-    return PyArray_Return(t);
+    Py_DECREF(theta);
+    return Py_BuildValue("(OO)", rho, phi);
+}
+
+static PyObject *
+DemNets_LinkThroughput(PyObject *self, PyObject* args) {
+    PyObject *netarg, *ldarg, *lwarg, *nwarg;
+    PyArrayObject *ltput, *ld, *lw, *nw, *net;
+    unsigned int *e, n;
+
+    // parse input
+    nwarg = NULL;
+    if(!PyArg_ParseTuple(args, "OOOO", &netarg, &nwarg, &lwarg, &ldarg))
+        return NULL;
+    net = (PyArrayObject *) PyArray_ContiguousFromObject(netarg, PyArray_UINT, 1, 1);
+    nw = (PyArrayObject *) PyArray_ContiguousFromObject(nwarg, PyArray_DOUBLE, 1, 1);
+    lw = (PyArrayObject *) PyArray_ContiguousFromObject(lwarg, PyArray_DOUBLE, 1, 1);
+    ld = (PyArrayObject *) PyArray_ContiguousFromObject(ldarg, PyArray_DOUBLE, 1, 1);
+    if(!net || !nw || !lw || !ld)
+        return NULL;
+
+    // check input
+    e = (unsigned int *) net->data;
+    n = e[0] - 1;
+    if(e[n] != net->dimensions[0]) {
+        PyErr_SetString(PyExc_IndexError, "corrupted network format.");
+        return NULL;
+    }
+    if(n != nw->dimensions[0]) {
+        PyErr_SetString(PyExc_IndexError, "node-weight array does not match network.");
+        return NULL;
+    }
+    n = e[n] - n - 1;
+    if(n != lw->dimensions[0]) {
+        PyErr_SetString(PyExc_IndexError, "link-weight array does not match network.");
+        return NULL;
+    }
+    if(n != ld->dimensions[0]) {
+        PyErr_SetString(PyExc_IndexError, "link-width array does not match network.");
+        return NULL;
+    }
+
+    // get link throughput
+    ltput = linkthroughput(e,(double *)nw->data,
+                         (double *)lw->data,
+                         (double *)ld->data);
+
+    Py_DECREF(net);
+    Py_DECREF(nw);
+    Py_DECREF(lw);
+    Py_DECREF(ld);
+    return PyArray_Return(ltput);
 }
 
 static PyObject *
@@ -2724,6 +2877,7 @@ static PyMethodDef DemNets_methods[] = {
     {"AveragePathLengths", DemNets_AveragePathLengths, METH_VARARGS, "..."},
     {"VoronoiArea", DemNets_VoronoiArea, METH_VARARGS, "..."},
     {"Throughput", DemNets_Throughput, METH_VARARGS, "..."},
+    {"LinkThroughput", DemNets_LinkThroughput, METH_VARARGS, "..."},
     {"RandomWalkThroughput", DemNets_RandomWalkThroughput, METH_VARARGS, "..."},
     {NULL, NULL, 0, NULL}
 };
