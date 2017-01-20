@@ -1273,97 +1273,171 @@ rwthroughput(const unsigned int *net,
 }
 
 void
-throughput(const unsigned int *net,
-           double *rho, double *phi,
-           const double *nw,
-           const double *lw,
-           const double *ld,
-           const double *theta) {
+AggregateLinkThroughput(double *rho, double *phi,
+        const unsigned int *net,
+        const double *ltput,
+        const double *theta) {
+    unsigned int i, j, k, n, c, *deg;
+    double x, y, rh, ph, d;
+    Queue *que;
+
+    n = net[0] - 1;
+    que = malloc(sizeof(Queue));
+    deg = malloc(n * sizeof(unsigned int));
+    if(!que || !deg) {
+        PyErr_SetString(PyExc_MemoryError, "failed to allocate queue ..");
+        exit(EXIT_FAILURE);
+    }
+    for(i = 0 ; i < n ; i++)
+        deg[i] = net[i+1] - net[i];
+    for(j = 0 ; j < n ; j++) {
+        que->first = que->last = NULL;
+        if(put(que, j, 0)) {
+            PyErr_SetString(PyExc_MemoryError, "failed to fill queue ..");
+            exit(EXIT_FAILURE);
+        }
+        c = 0;
+        x = y = 0;
+        while(!get(que, &i, &d)) {
+            if(d > 8)
+                break;
+            for(k = net[i]; k < net[i+1]; k++) {
+                rh = ltput[k - n - 1];
+                ph = theta[k - n - 1];
+                x += rh * cos(ph);
+                y += rh * sin(ph);
+                c++;
+                if(put(que, net[k], d+1)) {
+                    PyErr_SetString(PyExc_MemoryError, "failed to fill queue ..");
+                    exit(EXIT_FAILURE);
+                }
+            }
+        }
+        x /= c;
+        y /= c;
+        //x *= deg[j];
+        //y *= deg[j];
+        rho[j] = sqrt(x*x + y*y);
+        phi[j] = atan2(y, x);
+    }
+    free(que);
+    free(deg);
+}
+
+void
+NodeThroughput(double *rho, double *phi,
+        const unsigned int *net,
+        const double *nw,
+        const double *lw,
+        const double *ld,
+        const double *theta) {
     unsigned int i, k;
-    unsigned int n, *c;
-    unsigned int *seen;
+    unsigned int n;
+    unsigned int *seen, *deg;
     double ltp, lws, lds, psum;
-    double xtp, ytp;
+    double *xtp, *ytp, degr;
     Queue *que;
 
     n = net[0] - 1;
     seen = calloc(n, sizeof(unsigned int));
     que = malloc(sizeof(Queue));
-    c = calloc(n, sizeof(unsigned int));
-    if(!c || !que || !seen) {
+    deg = calloc(n, sizeof(unsigned int));
+    xtp = calloc(n, sizeof(double));
+    ytp = calloc(n, sizeof(double));
+    if(!deg || !que || !seen || !xtp || !ytp) {
         PyErr_SetString(PyExc_MemoryError, "...");
         exit(EXIT_FAILURE);
     }
     
-	// in-degree c
+	// in-degree deg
     for(i = 0 ; i < n ; i++) {
         for(k = net[i]; k < net[i+1]; k++)
-            c[net[k]]++;
+            deg[net[k]]++;
     }
     que->first = que->last = NULL;
     for(i = 0 ; i < n ; i++) {
         // hill tops
-        if(!c[i] && net[i] < net[i+1]) {
+        if(!deg[i] && net[i] < net[i+1]) {
             lws = lds = psum = 0;
             for(k = net[i]; k < net[i+1]; k++) {
                 lws += lw[k-n-1];
                 lds += ld[k-n-1];
+                //if(lw[k-n-1] < 1E-8) fprintf(stderr, "lw %i ->%i : %.3e\n", i, net[k], lw[k-n-1]);
+                //if(ld[k-n-1] < 1E-8) fprintf(stderr, "ld %i ->%i : %.3e\n", i, net[k], ld[k-n-1]);
             }
             for(k = net[i]; k < net[i+1]; k++)
-                psum += lw[k-n-1] * ld[k-n-1];
-            xtp = ytp = 0;
+                psum += lw[k-n-1] * ld[k-n-1] / lws / lds;
+            //ltpmax = 0;
             for(k = net[i]; k < net[i+1]; k++) {
-                //ltp = nw[i] * lw[k-n-1] * ld[k-n-1] / lws / lds / psum;
-                ltp = nw[i] * lw[k-n-1] * ld[k-n-1] / psum;
+                ltp = nw[i] * lw[k-n-1] * ld[k-n-1] / lws / lds / psum;
+                //ltp = nw[i] * lw[k-n-1] * ld[k-n-1] / psum;
                 //ltp = nw[i] * lw[k-n-1] / lws;
                 // put children j = net[k] of hill tops i into queue
                 if(put(que, net[k], ltp)) {
                     PyErr_SetString(PyExc_MemoryError, "failed to fill queue ..");
                     exit(EXIT_FAILURE);
                 }
-                xtp += ltp * cos(theta[k-n-1]) / ld[k-n-1];
-                ytp += ltp * sin(theta[k-n-1]) / ld[k-n-1];
+                /*if(ltp > ltpmax) {
+                    ltpmax = ltp;
+                    phi[i] = theta[k-n-1];
+                }*/
+                xtp[i] += ltp * cos(theta[k-n-1]) / ld[k-n-1];
+                ytp[i] += ltp * sin(theta[k-n-1]) / ld[k-n-1];
+                xtp[net[k]] += ltp * cos(theta[k-n-1]) / ld[k-n-1];
+                ytp[net[k]] += ltp * sin(theta[k-n-1]) / ld[k-n-1];
             }
-            rho[i] = sqrt(xtp*xtp + ytp*ytp);
-            phi[i] = atan2(ytp, xtp);
+            //rho[i] = ltpmax;
+            rho[i] = sqrt(xtp[i]*xtp[i] + ytp[i]*ytp[i]);
+            phi[i] = atan2(ytp[i], xtp[i]);
             seen[i] = 1;
         }
     }
     while(!get(que, &i, &ltp)) {
         rho[i] += ltp;
-        if(seen[i] == c[i] - 1) {
+        if(seen[i] == deg[i] - 1) {
             lws = lds = psum = 0;
             for(k = net[i]; k < net[i+1]; k++) {
                 lws += lw[k-n-1];
                 lds += ld[k-n-1];
+                //if(lw[k-n-1] < 1E-8) fprintf(stderr, "lw %i ->%i : %.3e\n", i, net[k], lw[k-n-1]);
+                //if(ld[k-n-1] < 1E-8) fprintf(stderr, "ld %i ->%i : %.3e\n", i, net[k], ld[k-n-1]);
             }
             for(k = net[i]; k < net[i+1]; k++)
-                psum += lw[k-n-1] * ld[k-n-1];
-            xtp = ytp = 0;
+                psum += lw[k-n-1] * ld[k-n-1] / lws / lds;
+            //ltpmax = 0;
             for(k = net[i]; k < net[i+1]; k++) {
-                //ltp = (rho[i] + nw[i]) * lw[k-n-1] * ld[k-n-1] / lws / lds / psum;
-                ltp = (rho[i] + nw[i]) * lw[k-n-1] * ld[k-n-1] / psum;
+                ltp = (rho[i] + nw[i]) * lw[k-n-1] * ld[k-n-1] / lws / lds / psum;
+                //ltp = (rho[i] + nw[i]) * lw[k-n-1] * ld[k-n-1] / psum;
                 //ltp = (rho[i] + nw[i]) * lw[k-n-1] / lws;
                 if(put(que, net[k], ltp)) {
                     PyErr_SetString(PyExc_MemoryError, "failed to fill queue ..");
                     exit(EXIT_FAILURE);
                 }
-                xtp += ltp * cos(theta[k-n-1]) / ld[k-n-1];
-                ytp += ltp * sin(theta[k-n-1]) / ld[k-n-1];
+                /*if(ltp > ltpmax) {
+                    ltpmax = ltp;
+                    phi[i] = theta[k-n-1];
+                }*/
+                xtp[i] += ltp * cos(theta[k-n-1]) / ld[k-n-1];
+                ytp[i] += ltp * sin(theta[k-n-1]) / ld[k-n-1];
+                xtp[net[k]] += ltp * cos(theta[k-n-1]) / ld[k-n-1];
+                ytp[net[k]] += ltp * sin(theta[k-n-1]) / ld[k-n-1];
             }
+            //rho[i] = ltpmax;
             //rho[i] = cos(M_PI / 2. + atan2(ytp, xtp) - atan2(y[i], x[i])) * sqrt(xtp*xtp + ytp*ytp);
-            rho[i] = sqrt(xtp*xtp + ytp*ytp);
-            phi[i] = atan2(ytp, xtp);
+            degr = deg[i] + net[i+1] - net[i];
+            if(degr)
+                rho[i] = sqrt(xtp[i]*xtp[i] + ytp[i]*ytp[i]) / degr;
+            phi[i] = atan2(ytp[i], xtp[i]);
         }
         seen[i]++;
     }
     free(seen);
     free(que);
-    free(c);
+    free(deg);
 }
 
 static PyArrayObject *
-linkthroughput(const unsigned int *net,
+LinkThroughput(const unsigned int *net,
            const double *nw,
            const double *lw,
            const double *ld) {
@@ -2424,37 +2498,77 @@ DemNets_ReverseLinks(PyObject *self, PyObject* args) {
 }
 
 static PyObject *
-DemNets_Throughput(PyObject *self, PyObject* args) {
-    PyObject *thetaarg, *netarg, *ldarg, *lwarg, *nwarg;
-    PyArrayObject *rho, *phi, *theta, *ld, *lw, *nw, *net;
-    unsigned int *e, n, i;
-    npy_intp *dim;
-    double *w, *rh, *ph;
+DemNets_AggregateLinkThroughput(PyObject *self, PyObject* args) {
+    PyObject *thetaarg, *ltputarg, *netarg;
+    PyArrayObject *rho, *phi, *theta, *ltput, *net;
+    npy_intp dim[1];
+    unsigned int *e, n;
+    double *rh, *ph;
 
     // parse input
-    nwarg = NULL;
-    if(!PyArg_ParseTuple(args, "OOOO|O", &netarg, &lwarg, &ldarg, &thetaarg, &nwarg))
+    if(!PyArg_ParseTuple(args, "OOO", &netarg, &ltputarg, &thetaarg))
         return NULL;
     net = (PyArrayObject *) PyArray_ContiguousFromObject(netarg, PyArray_UINT, 1, 1);
+    ltput = (PyArrayObject *) PyArray_ContiguousFromObject(ltputarg, PyArray_DOUBLE, 1, 1);
+    theta = (PyArrayObject *) PyArray_ContiguousFromObject(thetaarg, PyArray_DOUBLE, 1, 1);
+    if(!net || !ltput || !theta)
+        return NULL;
+
+    // check input
+    e = (unsigned int *) net->data;
+    n = e[0] - 1;
+    dim[0] = n;
+    if(e[n] != net->dimensions[0]) {
+        PyErr_SetString(PyExc_IndexError, "corrupted network format.");
+        return NULL;
+    }
+    n = e[n] - n - 1;
+    if(n != ltput->dimensions[0]) {
+        PyErr_SetString(PyExc_IndexError, "link throughput does not match network.");
+        return NULL;
+    }
+    if(n != theta->dimensions[0]) {
+        PyErr_SetString(PyExc_IndexError, "link-angle array does not match network.");
+        return NULL;
+    }
+
+    // allocate output arrays
+    rho = (PyArrayObject *) PyArray_ZEROS(1, dim, PyArray_DOUBLE, 0);
+    phi = (PyArrayObject *) PyArray_ZEROS(1, dim, PyArray_DOUBLE, 0);
+    if(!rho || !phi) {
+        PyErr_SetString(PyExc_MemoryError,
+        "Cannot allocate enough memory for output.");
+        return NULL;
+    }
+
+    rh = (double *)rho->data;
+    ph = (double *)phi->data;
+    AggregateLinkThroughput(rh, ph, e,
+                            (double *)ltput->data,
+                            (double *)theta->data);
+
+    Py_DECREF(net);
+    Py_DECREF(ltput);
+    Py_DECREF(theta);
+    return Py_BuildValue("(OO)", rho, phi);
+}
+
+static PyObject *
+DemNets_NodeThroughput(PyObject *self, PyObject* args) {
+    PyObject *thetaarg, *netarg, *ldarg, *lwarg, *nwarg;
+    PyArrayObject *rho, *phi, *theta, *ld, *lw, *nw, *net;
+    unsigned int *e, n;
+    double *rh, *ph;
+
+    // parse input
+    if(!PyArg_ParseTuple(args, "OOOOO", &netarg, &nwarg, &lwarg, &ldarg, &thetaarg))
+        return NULL;
+    net = (PyArrayObject *) PyArray_ContiguousFromObject(netarg, PyArray_UINT, 1, 1);
+    nw = (PyArrayObject *) PyArray_ContiguousFromObject(nwarg, PyArray_DOUBLE, 1, 1);
     lw = (PyArrayObject *) PyArray_ContiguousFromObject(lwarg, PyArray_DOUBLE, 1, 1);
     ld = (PyArrayObject *) PyArray_ContiguousFromObject(ldarg, PyArray_DOUBLE, 1, 1);
     theta = (PyArrayObject *) PyArray_ContiguousFromObject(thetaarg, PyArray_DOUBLE, 1, 1);
-    if(!net || !lw || !ld || !theta)
-        return NULL;
-    if(!nwarg) {
-        e = (unsigned int *) net->data;
-        dim = malloc(sizeof(npy_intp));
-        n = e[0] - 1;
-        dim[0] = n;
-        nw = (PyArrayObject *) PyArray_ZEROS(1, dim, PyArray_DOUBLE, 0);
-        free(dim);
-        w = (double *) nw->data;
-        for(i = 0; i < n; i++)
-            w[i] = 1.0;
-    } else {
-        nw = (PyArrayObject *) PyArray_ContiguousFromObject(nwarg, PyArray_DOUBLE, 1, 1);
-    }
-    if(!nw)
+    if(!net || !nw || !lw || !ld || !theta)
         return NULL;
 
     // check input
@@ -2494,7 +2608,7 @@ DemNets_Throughput(PyObject *self, PyObject* args) {
     // get node throughput
     rh = (double *)rho->data;
     ph = (double *)phi->data;
-    throughput(e, rh, ph,
+    NodeThroughput(rh, ph, e,
             (double *)nw->data,
             (double *)lw->data,
             (double *)ld->data,
@@ -2547,9 +2661,9 @@ DemNets_LinkThroughput(PyObject *self, PyObject* args) {
     }
 
     // get link throughput
-    ltput = linkthroughput(e,(double *)nw->data,
-                         (double *)lw->data,
-                         (double *)ld->data);
+    ltput = LinkThroughput(e,(double *)nw->data,
+                             (double *)lw->data,
+                             (double *)ld->data);
 
     Py_DECREF(net);
     Py_DECREF(nw);
@@ -2662,6 +2776,45 @@ DemNets_Revisits(PyObject *self, PyObject* args) {
     Py_DECREF(net);
     Py_DECREF(wlinks);
     return PyArray_Return(r);
+}
+
+static PyObject *
+DemNets_OutDegree(PyObject *self, PyObject* args) {
+    PyObject *netarg;
+    PyArrayObject *net, *deg;
+    npy_intp dim[1];
+    unsigned int *e, i, n;
+    double *d;
+
+    // parse input
+    if(!PyArg_ParseTuple(args, "O", &netarg))
+        return NULL;
+    net = (PyArrayObject *) PyArray_ContiguousFromObject(netarg, PyArray_UINT, 1, 1);
+    if(!net)
+        return NULL;
+
+    // check input
+    e = (unsigned int *) net->data;
+    n = e[0] - 1;
+    if(e[n] != net->dimensions[0]) {
+        PyErr_SetString(PyExc_IndexError, "corrupted network format.");
+        return NULL;
+    }
+
+    dim[0] = n;
+    deg = (PyArrayObject *) PyArray_ZEROS(1, dim, PyArray_DOUBLE, 0);
+    if(!deg) {
+        PyErr_SetString(PyExc_MemoryError,
+        "Cannot allocate enough memory for output.");
+        return NULL;
+    }
+
+    d = (double *) deg->data;
+    for(i = 0; i < n; i++)
+        d[i] = e[i+1] - e[i];
+
+    Py_DECREF(net);
+    return PyArray_Return(deg);
 }
 
 static PyObject *
@@ -2859,6 +3012,7 @@ DemNets_SinkDistance(PyObject *self, PyObject* args) {
 static PyMethodDef DemNets_methods[] = {
     {"Components", DemNets_Components, METH_VARARGS, "..."},
     {"Derivatives", DemNets_Derivatives, METH_VARARGS, "..."},
+    {"OutDegree", DemNets_OutDegree, METH_VARARGS, "..."},
     {"FuseNetworks", DemNets_FuseNetworks, METH_VARARGS, "..."},
     {"FlowNetwork", DemNets_FlowNetwork, METH_VARARGS, "..."},
     {"FlowNetworkFromGrid", DemNets_FlowNetworkFromGrid, METH_VARARGS, "..."},
@@ -2876,8 +3030,9 @@ static PyMethodDef DemNets_methods[] = {
     {"Revisits", DemNets_Revisits, METH_VARARGS, "..."},
     {"AveragePathLengths", DemNets_AveragePathLengths, METH_VARARGS, "..."},
     {"VoronoiArea", DemNets_VoronoiArea, METH_VARARGS, "..."},
-    {"Throughput", DemNets_Throughput, METH_VARARGS, "..."},
+    {"NodeThroughput", DemNets_NodeThroughput, METH_VARARGS, "..."},
     {"LinkThroughput", DemNets_LinkThroughput, METH_VARARGS, "..."},
+    {"AggregateLinkThroughput", DemNets_AggregateLinkThroughput, METH_VARARGS, "..."},
     {"RandomWalkThroughput", DemNets_RandomWalkThroughput, METH_VARARGS, "..."},
     {NULL, NULL, 0, NULL}
 };
