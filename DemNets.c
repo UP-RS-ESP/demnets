@@ -1464,7 +1464,7 @@ FacetFlowThroughput(double *ltp,
                     const double *spa,
                     const unsigned int m) {
     double ltpi;
-    unsigned int i, j, k;
+    unsigned int i, j, k, l;
     unsigned int *seen, *ideg, itr;
     Queue *que;
 
@@ -1483,21 +1483,22 @@ FacetFlowThroughput(double *ltp,
         itr = i * 2;
         for(j = 0; j < 2; j++) {
             k = itr + j;
-            if(m > spx[k])
-                ideg[spx[k]]++;
+            l = spx[k];
+            if(m > l)
+                ideg[l]++;
         }
     }
     ltpi = 0;
-    // start at facets without in-degree
+    // start at facets without in-degree draining into l
     for(i = 0; i < m; i++) {
         if(!ideg[i]) {
             itr = i * 2;
-            seen[i]++;
             for(j = 0; j < 2; j++) {
                 k = itr + j;
-                if(m > spx[k]) {
+                l = spx[k];
+                if(m > l) {
                     ltp[k] = spa[k];
-                    if(put(que, spx[k], ltp[k])) {
+                    if(put(que, l, ltp[k])) {
                         PyErr_SetString(PyExc_MemoryError, "failed to fill queue ..");
                         exit(EXIT_FAILURE);
                     }
@@ -1507,8 +1508,8 @@ FacetFlowThroughput(double *ltp,
     }
     // work the queue
     while(!get(que, &i, &ltpi)) {
-        itr = i * 2;
         seen[i]++;
+        itr = i * 2;
         ltp[itr] += ltpi;
         if(seen[i] == ideg[i]) {
             // we collected all input for node i
@@ -1516,10 +1517,11 @@ FacetFlowThroughput(double *ltp,
             ltp[itr] = 0;
             for(j = 0; j < 2; j++) {
                 k = itr + j;
-                if(m > spx[k]) {
+                l = spx[k];
+                if(m > l) {
                     // link throughput
                     ltp[k] = ltpi * spw[k] + spa[k];
-                    if(put(que, spx[k], ltp[k])) {
+                    if(put(que, l, ltp[k])) {
                         PyErr_SetString(PyExc_MemoryError, "failed to fill queue ..");
                         exit(EXIT_FAILURE);
                     }
@@ -1543,10 +1545,18 @@ FacetFlowNetwork(unsigned int *spx, double *spw, double *spa, double *spd, doubl
     double dx, dy, dz, dn, s, t;
     double xa, xb, xc, ya, yb, yc;
     double aa, ab, ac, bb, bc;
-    double zmin, phii, beta;
+    double zf, zmin, phii, beta;
     unsigned int i, j, k, o;
     unsigned int u, v, w, q, p;
-    unsigned int dest;
+    unsigned int dest, f, g, h;
+    unsigned int *seen;
+    Queue *que;
+
+    que = malloc(sizeof(Queue));
+    if(!que) {
+        PyErr_SetString(PyExc_MemoryError, "...");
+        exit(EXIT_FAILURE);
+    }
 
     for(i = 0; i < m; i++) {
         // at p, q we store the pos of children
@@ -1654,32 +1664,70 @@ FacetFlowNetwork(unsigned int *spx, double *spw, double *spa, double *spd, doubl
         }
     }
 
-    // fix lose ends
+    // fix sinks
     for(i = 0; i < m; i++) {
         p = i * 2;
         for(j = 0; j < 2; j++) {
             q = p + j;
             l = spx[q];
+            //l = m;
             if(l == m)
                 continue;
             // check whether two neighboring facets flow into each other
             if(spx[l*2] == i || spx[l*2+1] == i) {
                 // get lowest node of these two facets
+                que->first = que->last = NULL;
+                seen = calloc(m, sizeof(unsigned int));
                 u = NodeOfSimplicies(tri, i, l, z);
                 zmin = z[u];
                 dest = m;
                 for(k = net[u]; k < net[u+1]; k++) {
-                    if(net[k] == i || net[k] == l)
-                        continue;
-                    for(o = 0; o < 2; o++) {
-                        // find nodes of neighboring facets which are lower
-                        if(z[tri[net[k]*2 + o]] < zmin) {
-                            zmin = z[tri[net[k]*2 + o]];
-                            dest = net[k];
+                    g = net[k];
+                    seen[g]++;
+                    if(put(que, g, 0)) {
+                        PyErr_SetString(PyExc_MemoryError, "failed to fill queue ..");
+                        exit(EXIT_FAILURE);
+                    }
+                }
+                //fprintf(stderr, "%.2f: ", zmin);
+                xx = (x[tri[i*3]]+x[tri[i*3+1]]+x[tri[i*3+2]]) / 3.;
+                yy = (y[tri[i*3]]+y[tri[i*3+1]]+y[tri[i*3+2]]) / 3.;
+                while(!get(que, &f, &du) && dest == m) {
+                    //fprintf(stderr, "%.0f ", du);
+                    if(du > 50.0)
+                        break;
+                        //fprintf(stderr, "%i,%i: %i %.1f\n", i, l, f, du);
+                    zf = (z[tri[f*3]]+z[tri[f*3+1]]+z[tri[f*3+2]]) / 3.;
+                    if(zf < zmin && f != i && f != l) {
+                        dx = xx - (x[tri[f*3]]+x[tri[f*3+1]]+x[tri[f*3+2]]) / 3.;
+                        dy = yy - (y[tri[f*3]]+y[tri[f*3+1]]+y[tri[f*3+2]]) / 3.;
+                        //fprintf(stderr, "%.2f\n", sqrt(dx*dx+dy*dy));
+                        if(sqrt(dx*dx+dy*dy) < 50.0) {
+                            zmin = zf;
+                            dest = f;
+                            break;
+                        }
+                    }
+                    for(h = 0; h < 3; h++) {
+                        u = tri[f*3 + h];
+                        for(k = net[u]; k < net[u+1]; k++) {
+                            g = net[k];
+                            if(seen[g])
+                                continue;
+                            seen[g]++;
+                            if(put(que, g, du+1)) {
+                                PyErr_SetString(PyExc_MemoryError, "failed to fill queue ..");
+                                exit(EXIT_FAILURE);
+                            }
                         }
                     }
                 }
-                // drain into the lower facet dest (i->dest)
+                //fprintf(stderr, "\n");
+                while(!get(que, &f, &du));
+                free(seen);
+                if(dest == m)
+                    fprintf(stderr, "sink at %i %.3f %.0f\n", i, zmin, du);
+                // drain into the facet dest (i->dest)
                 spx[q] = dest;
                 // rewire also the other facet to that lower facet (l->dest)
                 for(o = 0; o < 2; o++)
@@ -1728,8 +1776,6 @@ SpecificNodeThroughput(double *rho, double *phi,
             for(k = net[i]; k < net[i+1]; k++) {
                 lws += lw[k-n-1];
                 lds += ld[k-n-1];
-                //if(lw[k-n-1] < 1E-8) fprintf(stderr, "lw %i ->%i : %.3e\n", i, net[k], lw[k-n-1]);
-                //if(ld[k-n-1] < 1E-8) fprintf(stderr, "ld %i ->%i : %.3e\n", i, net[k], ld[k-n-1]);
             }
             for(k = net[i]; k < net[i+1]; k++)
                 psum += lw[k-n-1] * ld[k-n-1] / lws / lds;
@@ -1767,8 +1813,6 @@ SpecificNodeThroughput(double *rho, double *phi,
             for(k = net[i]; k < net[i+1]; k++) {
                 lws += lw[k-n-1];
                 lds += ld[k-n-1];
-                //if(lw[k-n-1] < 1E-8) fprintf(stderr, "lw %i ->%i : %.3e\n", i, net[k], lw[k-n-1]);
-                //if(ld[k-n-1] < 1E-8) fprintf(stderr, "ld %i ->%i : %.3e\n", i, net[k], ld[k-n-1]);
             }
             for(k = net[i]; k < net[i+1]; k++)
                 psum += lw[k-n-1] * ld[k-n-1] / lws / lds;
@@ -1846,8 +1890,6 @@ NodeThroughput(double *rho, double *phi,
                 //    lws += lw[k-n-1] * lw[v-n-1];
                 lws += lw[k-n-1];
                 lds += ld[k-n-1];
-                //if(lw[k-n-1] < 1E-8) fprintf(stderr, "lw %i ->%i : %.3e\n", i, net[k], lw[k-n-1]);
-                //if(ld[k-n-1] < 1E-8) fprintf(stderr, "ld %i ->%i : %.3e\n", i, net[k], ld[k-n-1]);
             }
             for(k = net[i]; k < net[i+1]; k++) {
                 u = net[k];
@@ -1894,8 +1936,6 @@ NodeThroughput(double *rho, double *phi,
                 for(v = net[u]; v < net[u+1]; v++)
                     lws += lw[k-n-1] * lw[v-n-1];
                 lds += ld[k-n-1];
-                //if(lw[k-n-1] < 1E-8) fprintf(stderr, "lw %i ->%i : %.3e\n", i, net[k], lw[k-n-1]);
-                //if(ld[k-n-1] < 1E-8) fprintf(stderr, "ld %i ->%i : %.3e\n", i, net[k], ld[k-n-1]);
             }
             for(k = net[i]; k < net[i+1]; k++) {
                 u = net[k];
