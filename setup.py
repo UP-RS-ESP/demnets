@@ -4,7 +4,7 @@ import numpy
 mod = Extension('DemNets',
     include_dirs = [numpy.get_include()],
     sources = ['DemNets.c'],
-#    extra_compile_args=['-ggdb', '-fopenmp', '-O0'],
+    #extra_compile_args=['-ggdb', '-fopenmp'],#, '-O0'],
     extra_compile_args=['-fopenmp'],
     extra_link_args=['-lgomp']
 )

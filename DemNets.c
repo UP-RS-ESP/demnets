@@ -597,6 +597,77 @@ Simplicies(const unsigned int *tri,
 }
 
 static PyArrayObject *
+UpstreamNetwork(const unsigned int *spx,
+    const unsigned int m) {
+    PyArrayObject *net;
+    npy_intp dim[1];
+    unsigned int i, j, k, l, o;
+    unsigned int *lst[m], *e, ex, itr;
+    // reverse facet flow network spx
+
+    // alloc list of arrays
+    for(i = 0; i < m; i++) {
+        lst[i] = malloc(8 * sizeof(unsigned int));
+        if(!lst[i]) {
+            PyErr_SetString(PyExc_MemoryError, "malloc of list of arrays failed.");
+            return NULL;
+        }
+        lst[i][0] = 8;
+        lst[i][1] = 2;
+    }
+
+    l = 0;
+    for(i = 0; i < m; i++) {
+        itr = i * 2;
+        for(j = 0; j < 2; j++) {
+            k = spx[itr + j];
+            if(k == m)
+                continue;
+            ex = 0;
+            for(o = 2; o < lst[k][1]; o++) {
+                if(lst[k][o] == i) {
+                    ex = 1;
+                    break;
+                }
+            }
+            if(!ex) {
+                lst[k][lst[k][1]++] = i;
+                l++;
+            }
+            if(lst[k][0] < lst[k][1] + 2) {
+                lst[k][0] = lst[k][1] + 4;
+                lst[k] = realloc(lst[k], lst[k][0] * sizeof(unsigned int));
+                if(!lst[k]) {
+                    PyErr_SetString(PyExc_MemoryError, "realloc of array in list failed.");
+                    return NULL;
+                }
+            }
+        }
+    }
+
+    // alloc numpy array
+    dim[0] = l + m + 1;
+    net = (PyArrayObject *) PyArray_ZEROS(1, dim, PyArray_UINT, 0);
+    if(!net) {
+        PyErr_SetString(PyExc_MemoryError, "...");
+        return NULL;
+    }
+    e = (unsigned int *) net->data;
+
+    // store in compressed row format
+    j = m + 1;
+    for(i = 0; i < m; i++) {
+        e[i] = j;
+        for(k = 2; k < lst[i][1]; k++) {
+            e[j++] = lst[i][k];
+        }
+        free(lst[i]);
+    }
+    e[m] = j;
+    return net;
+}
+
+static PyArrayObject *
 network(const double *z,
         const unsigned int n,
         const unsigned int *tri,
@@ -1488,7 +1559,6 @@ FacetFlowThroughput(double *ltp,
                 ideg[l]++;
         }
     }
-    ltpi = 0;
     // start at facets without in-degree draining into l
     for(i = 0; i < m; i++) {
         if(!ideg[i]) {
@@ -1496,8 +1566,8 @@ FacetFlowThroughput(double *ltp,
             for(j = 0; j < 2; j++) {
                 k = itr + j;
                 l = spx[k];
+                ltp[k] = spa[k];
                 if(m > l) {
-                    ltp[k] = spa[k];
                     if(put(que, l, ltp[k])) {
                         PyErr_SetString(PyExc_MemoryError, "failed to fill queue ..");
                         exit(EXIT_FAILURE);
@@ -1518,9 +1588,9 @@ FacetFlowThroughput(double *ltp,
             for(j = 0; j < 2; j++) {
                 k = itr + j;
                 l = spx[k];
+                // link throughput
+                ltp[k] = ltpi * spw[k] + spa[k];
                 if(m > l) {
-                    // link throughput
-                    ltp[k] = ltpi * spw[k] + spa[k];
                     if(put(que, l, ltp[k])) {
                         PyErr_SetString(PyExc_MemoryError, "failed to fill queue ..");
                         exit(EXIT_FAILURE);
@@ -1529,6 +1599,10 @@ FacetFlowThroughput(double *ltp,
             }
         }
 	}
+    //for(i = 0; i < m; i++) {
+    //    ltp[i*2] = ideg[i] - seen[i];
+    //    ltp[i*2+1] = 0;
+    //}
 }
 
 void
@@ -1539,24 +1613,18 @@ FacetFlowNetwork(unsigned int *spx, double *spw, double *spa, double *spd, doubl
            const double *x,
            const double *y,
            const double *z) {
-    int sgn, l;
+    int sgn, flow;
     double du, dv, dw, a, b, c;
     double xx, yy, slp, frc;
     double dx, dy, dz, dn, s, t;
     double xa, xb, xc, ya, yb, yc;
     double aa, ab, ac, bb, bc;
     double zf, zmin, phii, beta;
-    unsigned int i, j, k, o;
+    unsigned int i, j, k, l, o;
     unsigned int u, v, w, q, p;
     unsigned int dest, f, g, h;
     unsigned int *seen;
     Queue *que;
-
-    que = malloc(sizeof(Queue));
-    if(!que) {
-        PyErr_SetString(PyExc_MemoryError, "...");
-        exit(EXIT_FAILURE);
-    }
 
     for(i = 0; i < m; i++) {
         // at p, q we store the pos of children
@@ -1665,6 +1733,7 @@ FacetFlowNetwork(unsigned int *spx, double *spw, double *spa, double *spd, doubl
     }
 
     // fix sinks
+#pragma omp parallel for private(i,j,k,l,p,q,u,du,zmin,zf,flow,dest,g,f,h,seen,que,xx,yy,dx,dy)
     for(i = 0; i < m; i++) {
         p = i * 2;
         for(j = 0; j < 2; j++) {
@@ -1676,8 +1745,13 @@ FacetFlowNetwork(unsigned int *spx, double *spw, double *spa, double *spd, doubl
             // check whether two neighboring facets flow into each other
             if(spx[l*2] == i || spx[l*2+1] == i) {
                 // get lowest node of these two facets
-                que->first = que->last = NULL;
+                que = malloc(sizeof(Queue));
                 seen = calloc(m, sizeof(unsigned int));
+                if(!que || !seen) {
+                    PyErr_SetString(PyExc_MemoryError, "...");
+                    exit(EXIT_FAILURE);
+                }
+                que->first = que->last = NULL;
                 u = NodeOfSimplicies(tri, i, l, z);
                 zmin = z[u];
                 dest = m;
@@ -1689,23 +1763,39 @@ FacetFlowNetwork(unsigned int *spx, double *spw, double *spa, double *spd, doubl
                         exit(EXIT_FAILURE);
                     }
                 }
-                //fprintf(stderr, "%.2f: ", zmin);
                 xx = (x[tri[i*3]]+x[tri[i*3+1]]+x[tri[i*3+2]]) / 3.;
                 yy = (y[tri[i*3]]+y[tri[i*3+1]]+y[tri[i*3+2]]) / 3.;
                 while(!get(que, &f, &du) && dest == m) {
-                    //fprintf(stderr, "%.0f ", du);
-                    if(du > 50.0)
+                    // don't look forever
+                    if(du > 50)
                         break;
-                        //fprintf(stderr, "%i,%i: %i %.1f\n", i, l, f, du);
-                    zf = (z[tri[f*3]]+z[tri[f*3+1]]+z[tri[f*3+2]]) / 3.;
-                    if(zf < zmin && f != i && f != l) {
-                        dx = xx - (x[tri[f*3]]+x[tri[f*3+1]]+x[tri[f*3+2]]) / 3.;
-                        dy = yy - (y[tri[f*3]]+y[tri[f*3+1]]+y[tri[f*3+2]]) / 3.;
-                        //fprintf(stderr, "%.2f\n", sqrt(dx*dx+dy*dy));
-                        if(sqrt(dx*dx+dy*dy) < 50.0) {
-                            zmin = zf;
-                            dest = f;
-                            break;
+                    // don't tube to where we came from
+                    if(f != i && f != l) {
+                        // zf = z of facet, the highest point of the current facet
+                        zf = z[tri[f*3]];
+                        if(z[tri[f*3+1]] > zf) zf = z[tri[f*3+1]];
+                        if(z[tri[f*3+2]] > zf) zf = z[tri[f*3+2]];
+                        /*
+                        flow = 0;
+                        if(du) {
+                            if(zf < zmin)
+                               flow = 1;
+                        } else {
+                            if(zf <= zmin)
+                                flow = 1;
+                        }
+                        if(flow) {
+                        */
+                        if(zf < zmin) {
+                            if(spx[f*2] != i && spx[f*2] != l && spx[f*2+1] != i && spx[f*2+1] != l) {
+                                dx = xx - (x[tri[f*3]]+x[tri[f*3+1]]+x[tri[f*3+2]]) / 3.;
+                                dy = yy - (y[tri[f*3]]+y[tri[f*3+1]]+y[tri[f*3+2]]) / 3.;
+                                if(sqrt(dx*dx+dy*dy) < 50) {
+                                    zmin = zf;
+                                    dest = f;
+                                    break;
+                                }
+                            }
                         }
                     }
                     for(h = 0; h < 3; h++) {
@@ -1725,17 +1815,151 @@ FacetFlowNetwork(unsigned int *spx, double *spw, double *spa, double *spd, doubl
                 //fprintf(stderr, "\n");
                 while(!get(que, &f, &du));
                 free(seen);
-                if(dest == m)
-                    fprintf(stderr, "sink at %i %.3f %.0f\n", i, zmin, du);
+                free(que);
+                //if(dest == m) fprintf(stderr, "sink at %i %.3f %.0f\n", i, zmin, du);
                 // drain into the facet dest (i->dest)
                 spx[q] = dest;
                 // rewire also the other facet to that lower facet (l->dest)
-                for(o = 0; o < 2; o++)
-                    if(spx[l*2+o] == i)
-                        spx[l*2+o] = dest;
+                for(h = 0; h < 2; h++)
+                    if(spx[l*2+h] == i)
+                        spx[l*2+h] = dest;
             }
         }
     }
+
+    // remove very long tubes ..
+#pragma omp parallel for private(i,j,p,q,l,xx,yy,dx,dy)
+    for(i = 0; i < m; i++) {
+        xx = (x[tri[i*3]]+x[tri[i*3+1]]+x[tri[i*3+2]]) / 3.;
+        yy = (y[tri[i*3]]+y[tri[i*3+1]]+y[tri[i*3+2]]) / 3.;
+        p = i * 2;
+        for(j = 0; j < 2; j++) {
+            q = p + j;
+            l = spx[q];
+            if(l == m)
+                continue;
+            dx = xx - (x[tri[l*3]]+x[tri[l*3+1]]+x[tri[l*3+2]]) / 3.;
+            dy = yy - (y[tri[l*3]]+y[tri[l*3+1]]+y[tri[l*3+2]]) / 3.;
+            if(sqrt(dx*dx+dy*dy) > 50)
+                spx[q] = m;
+        }
+    }
+
+    // fix spw and spa
+#pragma omp parallel for private(i,p)
+    for(i = 0; i < m; i++) {
+        p = i * 2;
+        if(spx[p] == m && spx[p+1] < m) {
+            spa[p+1] += spa[p];
+            spw[p+1] = 1;
+            spw[p] = 0;
+        } else if(spx[p] < m && spx[p+1] == m) {
+            spa[p] += spa[p+1];
+            spw[p] = 1;
+            spw[p+1] = 0;
+        }
+    }
+}
+
+void
+Thinning(unsigned int *b,
+         const double rcrit,
+         const double *x,
+         const double *y,
+         const double *z,
+         const unsigned int n) {
+    unsigned int i, k, l, m;
+    unsigned int *kl, len;
+    double xi, yi, zi;
+    double xk, yk, zk;
+    double r, rc;
+    double *ks, ksmax;
+
+    rc = rcrit * rcrit;
+
+#pragma omp parallel for private(i,k,xi,yi,zi,r)
+    for(i = 0; i < n; i++) {
+        xi = x[i];
+        yi = y[i];
+        zi = z[i];
+        for(k = 0; k < i; k++) {
+            if(!b[k])
+                continue;
+            r = (xi - x[k]) * (xi - x[k]) + (yi - y[k]) * (yi - y[k]);
+            if(r < rc) {
+                if(zi < z[k]) {
+#pragma omp atomic write
+                    b[k] = 0;
+                } else {
+                    b[i] = 0;
+                }
+            }
+        }
+    }   
+/*
+#pragma omp parallel for private(i,k,l,m,xi,yi,zi,xk,yk,zk,r,ks,kl,len,ksmax)
+    for(i = 0; i < n; i++) {
+        if(!b[i])
+            continue;
+        xi = x[i];
+        yi = y[i];
+        zi = z[i];
+        len = 24;
+        kl = malloc(len * sizeof(unsigned int));
+        if(!kl) {
+            PyErr_SetString(PyExc_MemoryError, "Thinning neighborhood of points to big");
+            exit(EXIT_FAILURE);
+        }
+        l = 0;
+        kl[l++] = i;
+        for(k = 0; k < n; k++) {
+            if(!b[k] || k == i)
+                continue;
+            r = (xi - x[k]) * (xi - x[k]) + (yi - y[k]) * (yi - y[k]);
+            if(r < rc) {
+                kl[l++] = k;
+                if(l >= len) {
+                    len += 24;
+                    kl = realloc(kl, len * sizeof(unsigned int));
+                    if(!kl) {
+                        PyErr_SetString(PyExc_MemoryError, "Thinning neighborhood of points to big");
+                        exit(EXIT_FAILURE);
+                    }
+                }
+            }
+        }
+        len = l;
+        if(len < 2)
+            continue;
+        kl = realloc(kl, len * sizeof(unsigned int));
+        ks = calloc(len, sizeof(double));
+        if(!kl || !ks) {
+            PyErr_SetString(PyExc_MemoryError, "Thinning neighborhood of points to big");
+            exit(EXIT_FAILURE);
+        }
+        for(k = 0; k < len; k++) {
+            xk = x[kl[k]];
+            yk = y[kl[k]];
+            zk = z[kl[k]];
+            for(l = 0; l < len; l++) {
+                if(l == k)
+                    continue;
+                r = sqrt((xk - x[kl[l]]) * (xk - x[kl[l]]) + (yk - y[kl[l]]) * (yk - y[kl[l]]));
+                if(r > 0)
+                    ks[k] += fabs(zk - z[kl[l]]) / r;
+            }
+        }
+        for(l = 0; l < len; l++) {
+            //fprintf(stderr, "%.2f\n", ks[l] / (len-1));
+            if(ks[l] / (len-1) > 1.0) {
+#pragma omp atomic write
+                b[kl[l]] = 0;
+            }
+        }
+        free(kl);
+        free(ks);
+    }
+*/
 }
 
 void
@@ -2904,6 +3128,24 @@ DemNets_Simplicies(PyObject *self, PyObject* args) {
 }
 
 static PyObject *
+DemNets_FacetUpstreamNetwork(PyObject *self, PyObject* args) {
+    PyObject *spxarg;
+    PyArrayObject *spx, *net;
+
+    // parse input
+    if(!PyArg_ParseTuple(args, "O", &spxarg))
+        return NULL;
+    spx = (PyArrayObject *) PyArray_ContiguousFromObject(spxarg, PyArray_UINT, 2, 2);
+    if(!spx)
+        return NULL;
+
+    // reverse the flow network
+    net = UpstreamNetwork((unsigned int *)spx->data, spx->dimensions[0]);
+    Py_DECREF(spx);
+    return PyArray_Return(net);
+}
+
+static PyObject *
 DemNets_FlowNetwork(PyObject *self, PyObject* args) {
     PyObject *elearg, *triarg;
     PyArrayObject *ele, *tri, *net;
@@ -3532,6 +3774,53 @@ DemNets_FacetFlowNetwork(PyObject *self, PyObject* args) {
 }
 
 static PyObject *
+DemNets_Thinning(PyObject *self, PyObject* args) {
+    PyObject *xarg, *yarg, *zarg;
+    PyArrayObject *x, *y, *z, *b;
+    unsigned int n;
+    double rcrit;
+
+    // parse input
+    if(!PyArg_ParseTuple(args, "OOOd", &xarg, &yarg, &zarg, &rcrit))
+        return NULL;
+    x = (PyArrayObject *) PyArray_ContiguousFromObject(xarg, PyArray_DOUBLE, 1, 1);
+    y = (PyArrayObject *) PyArray_ContiguousFromObject(yarg, PyArray_DOUBLE, 1, 1);
+    z = (PyArrayObject *) PyArray_ContiguousFromObject(zarg, PyArray_DOUBLE, 1, 1);
+    if(!x || !y || !z)
+        return NULL;
+
+    // check input
+    n = x->dimensions[0];
+    if(n != y->dimensions[0]) {
+        PyErr_SetString(PyExc_IndexError, "len(x) != len(y)");
+        return NULL;
+    }
+    if(n != z->dimensions[0]) {
+        PyErr_SetString(PyExc_IndexError, "len(x) != len(z)");
+        return NULL;
+    }
+
+    // allocate output array
+    b = (PyArrayObject *) PyArray_ZEROS(1, x->dimensions, PyArray_UINT, 0);
+    if(!b) {
+        PyErr_SetString(PyExc_MemoryError,
+        "Cannot allocate enough memory for output.");
+        return NULL;
+    }
+    PyArray_FILLWBYTE(b, 1);
+    
+    Thinning((unsigned int *)b->data, rcrit,
+            (double *)x->data,
+            (double *)y->data,
+            (double *)z->data, n);
+
+    Py_DECREF(x);
+    Py_DECREF(y);
+    Py_DECREF(z);
+    return PyArray_Return(b);
+}
+
+static PyObject *
 DemNets_LinkThroughput(PyObject *self, PyObject* args) {
     PyObject *netarg, *ldarg, *lwarg, *nwarg;
     PyArrayObject *ltput, *ld, *lw, *nw, *net;
@@ -3939,8 +4228,10 @@ static PyMethodDef DemNets_methods[] = {
     {"RemoveLinks", DemNets_RemoveLinks, METH_VARARGS, "..."},
     {"ReverseLinks", DemNets_ReverseLinks, METH_VARARGS, "..."},
     {"Revisits", DemNets_Revisits, METH_VARARGS, "..."},
+    {"Thinning", DemNets_Thinning, METH_VARARGS, "..."},
     {"AveragePathLengths", DemNets_AveragePathLengths, METH_VARARGS, "..."},
     {"VoronoiArea", DemNets_VoronoiArea, METH_VARARGS, "..."},
+    {"FacetUpstreamNetwork", DemNets_FacetUpstreamNetwork, METH_VARARGS, "..."},
     {"FacetFlowNetwork", DemNets_FacetFlowNetwork, METH_VARARGS, "..."},
     {"FacetFlowThroughput", DemNets_FacetFlowThroughput, METH_VARARGS, "..."},
     {"NodeThroughput", DemNets_NodeThroughput, METH_VARARGS, "..."},
