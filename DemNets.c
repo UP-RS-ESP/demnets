@@ -337,10 +337,6 @@ FacetFlowThroughput(double *ltp,
             }
         }
 	}
-    //for(i = 0; i < m; i++) {
-    //    ltp[i*2] = ideg[i] - seen[i];
-    //    ltp[i*2+1] = 0;
-    //}
 }
 
 void
@@ -357,12 +353,9 @@ FacetFlowNetwork(unsigned int *spx, double *spw, double *spa, double *spd, doubl
     double dx, dy, dz, dn, s, t;
     double xa, xb, xc, ya, yb, yc;
     double aa, ab, ac, bb, bc;
-    double zf, zmin, phii, beta;
-    unsigned int i, j, k, l;
+    double phii, beta;
+    unsigned int i, j;
     unsigned int u, v, w, q, p;
-    unsigned int dest, f, g, h;
-    unsigned int *seen;
-    Queue *que;
 
     for(i = 0; i < m; i++) {
         // at p, q we store the pos of children
@@ -469,117 +462,101 @@ FacetFlowNetwork(unsigned int *spx, double *spw, double *spa, double *spd, doubl
             }
         }
     }
+}
 
-    // fix sinks
-#pragma omp parallel for private(i,j,k,l,p,q,u,du,zmin,zf,dest,g,f,h,seen,que,xx,yy,dx,dy) schedule(guided)
+void
+Tubes(unsigned int *spx, double *spw, double *spa,
+           const unsigned int *net,
+           const unsigned int *tri,
+           const unsigned int m,
+           const double *x,
+           const double *y,
+           const double *z) {
+    double zu, zv, dv;
+    unsigned int p, q, u, v, w;
+    unsigned int i, j, k, l, s;
+    unsigned int *seen, dest;
+    Queue *que;
+
+#pragma omp parallel for private(i,j,k,l,s,p,q,u,v,w,zu,zv,dest,seen,que)
     for(i = 0; i < m; i++) {
         p = i * 2;
         for(j = 0; j < 2; j++) {
             q = p + j;
             l = spx[q];
-            //l = m;
             if(l == m)
                 continue;
             // check whether two neighboring facets flow into each other
             if(spx[l*2] == i || spx[l*2+1] == i) {
                 // get lowest node of these two facets
-                que = malloc(sizeof(Queue));
-                seen = calloc(m, sizeof(unsigned int));
-                if(!que || !seen) {
-                    PyErr_SetString(PyExc_MemoryError, "...");
-                    exit(EXIT_FAILURE);
-                }
-                que->first = que->last = NULL;
                 u = NodeOfSimplicies(tri, i, l, z);
-                zmin = z[u];
+                zu = z[u];
                 dest = m;
                 for(k = net[u]; k < net[u+1]; k++) {
-                    g = net[k];
-                    seen[g]++;
-                    if(put(que, g, 0)) {
-                        PyErr_SetString(PyExc_MemoryError, "failed to fill queue ..");
-                        exit(EXIT_FAILURE);
+                    v = net[k];
+                    if(v == i || v == l)
+                        continue;
+                    zv = z[tri[v*3]];
+                    if(z[tri[v*3+1]] > zv)
+                        zv = z[tri[v*3+1]];
+                    if(z[tri[v*3+2]] > zv)
+                        zv = z[tri[v*3+2]];
+                    if(zv == zu) {
+                        dest = v;
+                        break;
                     }
                 }
-                xx = (x[tri[i*3]]+x[tri[i*3+1]]+x[tri[i*3+2]]) / 3.;
-                yy = (y[tri[i*3]]+y[tri[i*3+1]]+y[tri[i*3+2]]) / 3.;
-                while(!get(que, &f, &du) && dest == m) {
-                    // don't look forever
-                    if(du > 50)
-                        break;
-                    // don't tube to where we came from
-                    if(f != i && f != l) {
-                        // zf = z of facet, the highest point of the current facet
-                        zf = z[tri[f*3]];
-                        if(z[tri[f*3+1]] > zf) zf = z[tri[f*3+1]];
-                        if(z[tri[f*3+2]] > zf) zf = z[tri[f*3+2]];
-                        /*
-                        flow = 0;
-                        if(du) {
-                            if(zf < zmin)
-                               flow = 1;
-                        } else {
-                            if(zf <= zmin)
-                                flow = 1;
+                if(dest == m) {
+                    // sinks
+                    que = malloc(sizeof(Queue));
+                    seen = calloc(m, sizeof(unsigned int));
+                    if(!que || !seen) {
+                        PyErr_SetString(PyExc_MemoryError, "...");
+                        exit(EXIT_FAILURE);
+                    }
+                    que->first = que->last = NULL;
+                    for(k = net[u]; k < net[u+1]; k++) {
+                        v = net[k];
+                        seen[v]++;
+                        if(put(que, v, 0)) {
+                            PyErr_SetString(PyExc_MemoryError, "failed to fill queue ..");
+                            exit(EXIT_FAILURE);
                         }
-                        if(flow) {
-                        */
-                        if(zf < zmin) {
-                            if(spx[f*2] != i && spx[f*2] != l && spx[f*2+1] != i && spx[f*2+1] != l) {
-                                dx = xx - (x[tri[f*3]]+x[tri[f*3+1]]+x[tri[f*3+2]]) / 3.;
-                                dy = yy - (y[tri[f*3]]+y[tri[f*3+1]]+y[tri[f*3+2]]) / 3.;
-                                if(sqrt(dx*dx+dy*dy) < 50) {
-                                    zmin = zf;
-                                    dest = f;
-                                    break;
+                    }
+                    while(!get(que, &v, &dv) && dest == m) {
+                        zv = z[tri[v*3]];
+                        if(z[tri[v*3+1]] > zv)
+                            zv = z[tri[v*3+1]];
+                        if(z[tri[v*3+2]] > zv)
+                            zv = z[tri[v*3+2]];
+                        if(zv < zu) {
+                            dest = v;
+                            break;
+                        }
+                        for(s = 0; s < 3; s++) {
+                            u = tri[v*3+s];
+                            for(k = net[u]; k < net[u+1]; k++) {
+                                w = net[k];
+                                if(seen[w])
+                                    continue;
+                                seen[w]++;
+                                if(put(que, w, dv+1)) {
+                                    PyErr_SetString(PyExc_MemoryError, "failed to fill queue ..");
+                                    exit(EXIT_FAILURE);
                                 }
                             }
                         }
                     }
-                    for(h = 0; h < 3; h++) {
-                        u = tri[f*3 + h];
-                        for(k = net[u]; k < net[u+1]; k++) {
-                            g = net[k];
-                            if(seen[g])
-                                continue;
-                            seen[g]++;
-                            if(put(que, g, du+1)) {
-                                PyErr_SetString(PyExc_MemoryError, "failed to fill queue ..");
-                                exit(EXIT_FAILURE);
-                            }
-                        }
-                    }
+                    while(!get(que, &v, &dv));
+                    free(seen);
+                    free(que);
                 }
-                //fprintf(stderr, "\n");
-                while(!get(que, &f, &du));
-                free(seen);
-                free(que);
-                //if(dest == m) fprintf(stderr, "sink at %i %.3f %.0f\n", i, zmin, du);
-                // drain into the facet dest (i->dest)
                 spx[q] = dest;
                 // rewire also the other facet to that lower facet (l->dest)
-                for(h = 0; h < 2; h++)
-                    if(spx[l*2+h] == i)
-                        spx[l*2+h] = dest;
+                for(k = 0; k < 2; k++)
+                    if(spx[l*2+k] == i)
+                        spx[l*2+k] = dest;
             }
-        }
-    }
-
-    // remove very long tubes ..
-#pragma omp parallel for private(i,j,p,q,l,xx,yy,dx,dy)
-    for(i = 0; i < m; i++) {
-        xx = (x[tri[i*3]]+x[tri[i*3+1]]+x[tri[i*3+2]]) / 3.;
-        yy = (y[tri[i*3]]+y[tri[i*3+1]]+y[tri[i*3+2]]) / 3.;
-        p = i * 2;
-        for(j = 0; j < 2; j++) {
-            q = p + j;
-            l = spx[q];
-            if(l == m)
-                continue;
-            dx = xx - (x[tri[l*3]]+x[tri[l*3+1]]+x[tri[l*3+2]]) / 3.;
-            dy = yy - (y[tri[l*3]]+y[tri[l*3+1]]+y[tri[l*3+2]]) / 3.;
-            if(sqrt(dx*dx+dy*dy) > 50)
-                spx[q] = m;
         }
     }
 
@@ -739,7 +716,7 @@ DemNets_FacetFlowNetwork(PyObject *self, PyObject* args) {
         return NULL;
     }
 
-    // get node throughput
+    // get basic voronoi shaped flow network
     FacetFlowNetwork((unsigned int *)spx->data,
                   (double *)spw->data,
                   (double *)spa->data,
@@ -760,8 +737,69 @@ DemNets_FacetFlowNetwork(PyObject *self, PyObject* args) {
     return Py_BuildValue("(OOOOO)", spx, spw, spa, spd, phi);
 }
 
+static PyObject *
+DemNets_Tubes(PyObject *self, PyObject* args) {
+    PyObject *netarg, *triarg, *xarg, *yarg, *zarg, *spxarg, *spwarg, *spaarg;
+    PyArrayObject *spx, *spw, *spa;
+    PyArrayObject *x, *y, *z, *net, *tri;
+    unsigned int *e, n;
+
+    // parse input
+    if(!PyArg_ParseTuple(args, "OOOOOOOO", &triarg, &netarg, &xarg, &yarg, &zarg, &spxarg, &spwarg, &spaarg))
+        return NULL;
+    tri = (PyArrayObject *) PyArray_ContiguousFromObject(triarg, PyArray_UINT, 2, 2);
+    net = (PyArrayObject *) PyArray_ContiguousFromObject(netarg, PyArray_UINT, 1, 1);
+    x = (PyArrayObject *) PyArray_ContiguousFromObject(xarg, PyArray_DOUBLE, 1, 1);
+    y = (PyArrayObject *) PyArray_ContiguousFromObject(yarg, PyArray_DOUBLE, 1, 1);
+    z = (PyArrayObject *) PyArray_ContiguousFromObject(zarg, PyArray_DOUBLE, 1, 1);
+    spx = (PyArrayObject *) PyArray_ContiguousFromObject(spxarg, PyArray_UINT, 2, 2);
+    spw = (PyArrayObject *) PyArray_ContiguousFromObject(spwarg, PyArray_DOUBLE, 2, 2);
+    spa = (PyArrayObject *) PyArray_ContiguousFromObject(spaarg, PyArray_DOUBLE, 2, 2);
+    if(!tri || !net || !x || !y || !z || !spx || !spw || !spa)
+        return NULL;
+
+    // check input
+    e = (unsigned int *) net->data;
+    n = e[0] - 1;
+    if(e[n] != net->dimensions[0]) {
+        PyErr_SetString(PyExc_IndexError, "corrupted network format.");
+        return NULL;
+    }
+    if(n != x->dimensions[0]) {
+        PyErr_SetString(PyExc_IndexError, "x array does not match network.");
+        return NULL;
+    }
+    if(n != y->dimensions[0]) {
+        PyErr_SetString(PyExc_IndexError, "y array does not match network.");
+        return NULL;
+    }
+    if(n != z->dimensions[0]) {
+        PyErr_SetString(PyExc_IndexError, "z array does not match network.");
+        return NULL;
+    }
+
+    // introduce tubes for subsurface flows in order to handle sinks
+    Tubes((unsigned int *)spx->data,
+                  (double *)spw->data,
+                  (double *)spa->data,
+            (unsigned int *)net->data,
+            (unsigned int *)tri->data,
+            tri->dimensions[0],
+            (double *)x->data,
+            (double *)y->data,
+            (double *)z->data);
+
+    Py_DECREF(net);
+    Py_DECREF(x);
+    Py_DECREF(y);
+    Py_DECREF(z);
+    Py_DECREF(tri);
+    return Py_BuildValue("(OOO)", spx, spw, spa);
+}
+
 static PyMethodDef DemNets_Methods[] = {
     {"Simplicies", DemNets_Simplicies, METH_VARARGS, "..."},
+    {"Tubes", DemNets_Tubes, METH_VARARGS, "..."},
     {"FacetUpstreamNetwork", DemNets_FacetUpstreamNetwork, METH_VARARGS, "..."},
     {"FacetFlowNetwork", DemNets_FacetFlowNetwork, METH_VARARGS, "..."},
     {"FacetFlowThroughput", DemNets_FacetFlowThroughput, METH_VARARGS, "..."},
