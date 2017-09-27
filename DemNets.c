@@ -62,6 +62,89 @@ get(Queue *q,
     return 0;
 }
 
+void
+GridAggregate(double *ug, double *vg,
+        const double *xb, const unsigned int xbn,
+        const double *yb, const unsigned int ybn,
+        const double *x, const double *y,
+        const double *u, const double *v,
+        const unsigned int n) {
+    unsigned int i, k, l, lk, id, count;
+    double xl, yl, usum, vsum;
+
+#pragma omp parallel for private(i,k,l,lk,id,count,xl,yl,usum,vsum)
+    for(i = 0; i < xbn; i++) {
+        lk = 0;
+        id = i * ybn;
+        for(k = 0; k < ybn; k++) {
+            count = 0;
+            usum = vsum = 0;
+            for(l = lk; l < n; l++) {
+                yl = y[l];
+                if(yl >= yb[k+1]) {
+                    lk = l;
+                    break;
+                }
+                xl = x[l];
+                if(xb[i] <= xl && xl < xb[i+1]) {
+                    usum += u[l];
+                    vsum += v[l];
+                    count++;
+                }
+            }
+            if(count) {
+                ug[id+k] = usum / count;
+                vg[id+k] = vsum / count;
+            }
+        }
+    }
+}
+
+void
+GridAggregateVar(double *ug, double *vg,
+        const double *xb, const unsigned int xbn,
+        const double *yb, const unsigned int ybn,
+        const double *x, const double *y,
+        const double *u, const double *v,
+        const double *umean, const double *vmean,
+        const unsigned int n) {
+    unsigned int i, k, l, lk, id, count, minc;
+    double xl, yl, um, vm, usum, vsum;
+
+    minc = 5;
+
+    // unbiased two-pass variance with minimum sample size minc
+#pragma omp parallel for private(i,k,l,lk,id,count,xl,yl,um,vm,usum,vsum)
+    for(i = 0; i < xbn; i++) {
+        lk = 0;
+        id = i * ybn;
+        for(k = 0; k < ybn; k++) {
+            count = 0;
+            usum = vsum = 0;
+            um = umean[id+k];
+            vm = vmean[id+k];
+            for(l = lk; l < n; l++) {
+                yl = y[l];
+                if(yl >= yb[k+1]) {
+                    lk = l;
+                    break;
+                }
+                xl = x[l];
+                if(xb[i] <= xl && xl < xb[i+1]) {
+                    usum += (u[l] - um) * (u[l] - um);
+                    vsum += (v[l] - vm) * (v[l] - vm);
+                    count++;
+                }
+            }
+            if(count > minc) {
+                count--;
+                ug[id+k] = usum / count;
+                vg[id+k] = vsum / count;
+            }
+        }
+    }
+}
+
 static PyArrayObject *
 Simplicies(const unsigned int *tri,
            const unsigned int m,
@@ -596,6 +679,131 @@ DemNets_Simplicies(PyObject *self, PyObject* args) {
 }
 
 static PyObject *
+DemNets_GridAggregate(PyObject *self, PyObject* args) {
+    PyObject *xbarg, *ybarg, *xarg, *yarg, *uarg, *varg;
+    PyArrayObject *xb, *yb, *x, *y, *u, *v, *ugrid, *vgrid;
+    unsigned int n;
+    npy_intp dim[2];
+
+    // parse input
+    if(!PyArg_ParseTuple(args, "OOOOOO", &xbarg, &ybarg, &xarg, &yarg, &uarg, &varg))
+        return NULL;
+    xb = (PyArrayObject *) PyArray_ContiguousFromObject(xbarg, PyArray_DOUBLE, 1, 1);
+    yb = (PyArrayObject *) PyArray_ContiguousFromObject(ybarg, PyArray_DOUBLE, 1, 1);
+    x = (PyArrayObject *) PyArray_ContiguousFromObject(xarg, PyArray_DOUBLE, 1, 1);
+    y = (PyArrayObject *) PyArray_ContiguousFromObject(yarg, PyArray_DOUBLE, 1, 1);
+    u = (PyArrayObject *) PyArray_ContiguousFromObject(uarg, PyArray_DOUBLE, 1, 1);
+    v = (PyArrayObject *) PyArray_ContiguousFromObject(varg, PyArray_DOUBLE, 1, 1);
+    if(!xb || !yb || !x || !y || !u || !v)
+        return NULL;
+
+    // sanity check
+    n = x->dimensions[0];
+    if(n != y->dimensions[0]) {
+        PyErr_SetString(PyExc_IndexError, "dimension mismatch between x and y coordinates.");
+        return NULL;
+    }
+    if(n != u->dimensions[0]) {
+        PyErr_SetString(PyExc_IndexError, "dimension mismatch between vectors and coordinates.");
+        return NULL;
+    }
+    if(n != v->dimensions[0]) {
+        PyErr_SetString(PyExc_IndexError, "dimension mismatch between u and v components.");
+        return NULL;
+    }
+
+    // alloc numpy array
+    dim[0] = (xb->dimensions[0] - 1);
+    dim[1] = (yb->dimensions[0] - 1);
+    ugrid = (PyArrayObject *) PyArray_ZEROS(2, dim, PyArray_DOUBLE, 0);
+    vgrid = (PyArrayObject *) PyArray_ZEROS(2, dim, PyArray_DOUBLE, 0);
+    if(!ugrid || !vgrid) {
+        PyErr_SetString(PyExc_MemoryError, "...");
+        return NULL;
+    }
+
+    // vectorial mean for each grid cell defined by (xb, yb)
+    GridAggregate((double *)ugrid->data, (double *)vgrid->data,
+                  (double *)xb->data, dim[0],
+                  (double *)yb->data, dim[1],
+                  (double *)x->data, (double *)y->data,
+                  (double *)u->data, (double *)v->data, n);
+
+    Py_DECREF(xb);
+    Py_DECREF(yb);
+    Py_DECREF(x);
+    Py_DECREF(y);
+    Py_DECREF(u);
+    Py_DECREF(v);
+    return Py_BuildValue("(OO)", ugrid, vgrid);
+}
+
+static PyObject *
+DemNets_GridAggregateVar(PyObject *self, PyObject* args) {
+    PyObject *xbarg, *ybarg, *xarg, *yarg, *uarg, *varg, *umarg, *vmarg;
+    PyArrayObject *xb, *yb, *x, *y, *u, *v, *ugrid, *vgrid, *umean, *vmean;
+    unsigned int n;
+    npy_intp dim[2];
+
+    // parse input
+    if(!PyArg_ParseTuple(args, "OOOOOOOO", &xbarg, &ybarg, &xarg, &yarg, &uarg, &varg, &umarg, &vmarg))
+        return NULL;
+    xb = (PyArrayObject *) PyArray_ContiguousFromObject(xbarg, PyArray_DOUBLE, 1, 1);
+    yb = (PyArrayObject *) PyArray_ContiguousFromObject(ybarg, PyArray_DOUBLE, 1, 1);
+    x = (PyArrayObject *) PyArray_ContiguousFromObject(xarg, PyArray_DOUBLE, 1, 1);
+    y = (PyArrayObject *) PyArray_ContiguousFromObject(yarg, PyArray_DOUBLE, 1, 1);
+    u = (PyArrayObject *) PyArray_ContiguousFromObject(uarg, PyArray_DOUBLE, 1, 1);
+    v = (PyArrayObject *) PyArray_ContiguousFromObject(varg, PyArray_DOUBLE, 1, 1);
+    umean = (PyArrayObject *) PyArray_ContiguousFromObject(umarg, PyArray_DOUBLE, 2, 2);
+    vmean = (PyArrayObject *) PyArray_ContiguousFromObject(vmarg, PyArray_DOUBLE, 2, 2);
+    if(!xb || !yb || !x || !y || !u || !v || !umean || !vmean)
+        return NULL;
+
+    // sanity check
+    n = x->dimensions[0];
+    if(n != y->dimensions[0]) {
+        PyErr_SetString(PyExc_IndexError, "dimension mismatch between x and y coordinates.");
+        return NULL;
+    }
+    if(n != u->dimensions[0]) {
+        PyErr_SetString(PyExc_IndexError, "dimension mismatch between vectors and coordinates.");
+        return NULL;
+    }
+    if(n != v->dimensions[0]) {
+        PyErr_SetString(PyExc_IndexError, "dimension mismatch between u and v components.");
+        return NULL;
+    }
+
+    // alloc numpy array
+    dim[0] = (xb->dimensions[0] - 1);
+    dim[1] = (yb->dimensions[0] - 1);
+    ugrid = (PyArrayObject *) PyArray_ZEROS(2, dim, PyArray_DOUBLE, 0);
+    vgrid = (PyArrayObject *) PyArray_ZEROS(2, dim, PyArray_DOUBLE, 0);
+    if(!ugrid || !vgrid) {
+        PyErr_SetString(PyExc_MemoryError, "...");
+        return NULL;
+    }
+
+    // vectorial variance for each grid cell defined by (xb, yb)
+    GridAggregateVar((double *)ugrid->data, (double *)vgrid->data,
+                  (double *)xb->data, dim[0],
+                  (double *)yb->data, dim[1],
+                  (double *)x->data, (double *)y->data,
+                  (double *)u->data, (double *)v->data,
+                  (double *)umean->data, (double *)vmean->data, n);
+
+    Py_DECREF(xb);
+    Py_DECREF(yb);
+    Py_DECREF(x);
+    Py_DECREF(y);
+    Py_DECREF(u);
+    Py_DECREF(v);
+    Py_DECREF(umean);
+    Py_DECREF(vmean);
+    return Py_BuildValue("(OO)", ugrid, vgrid);
+}
+
+static PyObject *
 DemNets_FacetUpstreamNetwork(PyObject *self, PyObject* args) {
     PyObject *spxarg;
     PyArrayObject *spx, *net;
@@ -800,6 +1008,8 @@ DemNets_Tubes(PyObject *self, PyObject* args) {
 static PyMethodDef DemNets_Methods[] = {
     {"Simplicies", DemNets_Simplicies, METH_VARARGS, "..."},
     {"Tubes", DemNets_Tubes, METH_VARARGS, "..."},
+    {"GridAggregate", DemNets_GridAggregate, METH_VARARGS, "..."},
+    {"GridAggregateVar", DemNets_GridAggregateVar, METH_VARARGS, "..."},
     {"FacetUpstreamNetwork", DemNets_FacetUpstreamNetwork, METH_VARARGS, "..."},
     {"FacetFlowNetwork", DemNets_FacetFlowNetwork, METH_VARARGS, "..."},
     {"FacetFlowThroughput", DemNets_FacetFlowThroughput, METH_VARARGS, "..."},
