@@ -145,6 +145,38 @@ GridAggregateVar(double *ug, double *vg,
     }
 }
 
+void
+GridMaximum(double *zg,
+        const double *xb, const unsigned int xbn,
+        const double *yb, const unsigned int ybn,
+        const double *x, const double *y, const double *z,
+        const unsigned int n) {
+    unsigned int i, k, l, lk, id;
+    double xl, yl, zmax;
+
+#pragma omp parallel for private(i,k,l,lk,id,xl,yl,zmax)
+    for(i = 0; i < xbn; i++) {
+        lk = 0;
+        id = i * ybn;
+        for(k = 0; k < ybn; k++) {
+            zmax = 0;
+            for(l = lk; l < n; l++) {
+                yl = y[l];
+                if(yl >= yb[k+1]) {
+                    lk = l;
+                    break;
+                }
+                xl = x[l];
+                if(xb[i] <= xl && xl < xb[i+1]) {
+                    if(z[l] > zmax)
+                        zmax = z[l];
+                }
+            }
+            zg[id+k] = zmax;
+        }
+    }
+}
+
 static PyArrayObject *
 Simplicies(const unsigned int *tri,
            const unsigned int m,
@@ -804,6 +836,59 @@ DemNets_GridAggregateVar(PyObject *self, PyObject* args) {
 }
 
 static PyObject *
+DemNets_GridMaximum(PyObject *self, PyObject* args) {
+    PyObject *xbarg, *ybarg, *xarg, *yarg, *zarg;
+    PyArrayObject *xb, *yb, *x, *y, *z, *zgrid;
+    unsigned int n;
+    npy_intp dim[2];
+
+    // parse input
+    if(!PyArg_ParseTuple(args, "OOOOO", &xbarg, &ybarg, &xarg, &yarg, &zarg))
+        return NULL;
+    xb = (PyArrayObject *) PyArray_ContiguousFromObject(xbarg, PyArray_DOUBLE, 1, 1);
+    yb = (PyArrayObject *) PyArray_ContiguousFromObject(ybarg, PyArray_DOUBLE, 1, 1);
+    x = (PyArrayObject *) PyArray_ContiguousFromObject(xarg, PyArray_DOUBLE, 1, 1);
+    y = (PyArrayObject *) PyArray_ContiguousFromObject(yarg, PyArray_DOUBLE, 1, 1);
+    z = (PyArrayObject *) PyArray_ContiguousFromObject(zarg, PyArray_DOUBLE, 1, 1);
+    if(!xb || !yb || !x || !y || !z)
+        return NULL;
+
+    // sanity check
+    n = x->dimensions[0];
+    if(n != y->dimensions[0]) {
+        PyErr_SetString(PyExc_IndexError, "dimension mismatch between x and y coordinates.");
+        return NULL;
+    }
+    if(n != z->dimensions[0]) {
+        PyErr_SetString(PyExc_IndexError, "dimension mismatch between variable and coordinates.");
+        return NULL;
+    }
+
+    // alloc numpy array
+    dim[0] = (xb->dimensions[0] - 1);
+    dim[1] = (yb->dimensions[0] - 1);
+    zgrid = (PyArrayObject *) PyArray_ZEROS(2, dim, PyArray_DOUBLE, 0);
+    if(!zgrid) {
+        PyErr_SetString(PyExc_MemoryError, "...");
+        return NULL;
+    }
+
+    GridMaximum((double *)zgrid->data,
+                (double *)xb->data, dim[0],
+                (double *)yb->data, dim[1],
+                (double *)x->data,
+                (double *)y->data,
+                (double *)z->data, n);
+
+    Py_DECREF(xb);
+    Py_DECREF(yb);
+    Py_DECREF(x);
+    Py_DECREF(y);
+    Py_DECREF(z);
+    return PyArray_Return(zgrid);
+}
+
+static PyObject *
 DemNets_FacetUpstreamNetwork(PyObject *self, PyObject* args) {
     PyObject *spxarg;
     PyArrayObject *spx, *net;
@@ -1010,6 +1095,7 @@ static PyMethodDef DemNets_Methods[] = {
     {"Tubes", DemNets_Tubes, METH_VARARGS, "..."},
     {"GridAggregate", DemNets_GridAggregate, METH_VARARGS, "..."},
     {"GridAggregateVar", DemNets_GridAggregateVar, METH_VARARGS, "..."},
+    {"GridMaximum", DemNets_GridMaximum, METH_VARARGS, "..."},
     {"FacetUpstreamNetwork", DemNets_FacetUpstreamNetwork, METH_VARARGS, "..."},
     {"FacetFlowNetwork", DemNets_FacetFlowNetwork, METH_VARARGS, "..."},
     {"FacetFlowThroughput", DemNets_FacetFlowThroughput, METH_VARARGS, "..."},
