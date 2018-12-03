@@ -63,7 +63,7 @@ get(Queue *q,
 }
 
 void
-GridAggregate(double *ug, double *vg,
+GridAggregate(double *ug, double *vg, unsigned int *cg,
         const double *xb, const unsigned int xbn,
         const double *yb, const unsigned int ybn,
         const double *x, const double *y,
@@ -95,6 +95,7 @@ GridAggregate(double *ug, double *vg,
             if(count) {
                 ug[id+k] = usum / count;
                 vg[id+k] = vsum / count;
+                cg[id+k] = count;
             }
         }
     }
@@ -173,6 +174,40 @@ GridMaximum(double *zg,
                 }
             }
             zg[id+k] = zmax;
+        }
+    }
+}
+
+void
+Thinning(int *idx,
+        const double *xb, const unsigned int xbn,
+        const double *yb, const unsigned int ybn,
+        const double *x, const double *y, const double *z,
+        const unsigned int n) {
+    unsigned int i, k, l, lk, lmin;
+    double xl, yl, zmin;
+
+#pragma omp parallel for private(i,k,l,lk,xl,yl,zmin,lmin)
+    for(i = 0; i < xbn; i++) {
+        lk = 0;
+        for(k = 0; k < ybn; k++) {
+            zmin = 9E9;
+	    lmin = 0;
+            for(l = lk; l < n; l++) {
+                yl = y[l];
+                if(yl >= yb[k+1]) {
+                    lk = l;
+                    break;
+                }
+                xl = x[l];
+                if(xb[i] <= xl && xl < xb[i+1]) {
+                    if(z[l] < zmin) {
+                        zmin = z[l];
+                        lmin = l;
+                    }
+                }
+            }
+            idx[lmin] = 1;
         }
     }
 }
@@ -338,23 +373,30 @@ NodeOfSimplicies(const unsigned int *tri,
                  const unsigned int a,
                  const unsigned int b,
                  const double *z) {
-    unsigned int i, j, k, p, q;
+    int r;
+    unsigned int i, k, p, q;
     double zmin;
 
     // get the lowest node j of two facets a and b
     p = a*3;
     q = b*3;
     zmin = 1E99;
-    j = 0;
-    for(i = 0; i < 3; i++)
-        for(k = 0; k < 3; k++)
+    r = -1;
+    for(i = 0; i < 3; i++) {
+        for(k = 0; k < 3; k++) {
             if(tri[p+i] == tri[q+k]) {
                 if(z[tri[p+i]] < zmin) {
                     zmin = z[tri[p+i]];
-                    j = tri[p+i];
+                    r = tri[p+i];
                 }
             }
-    return j;
+        }
+    }
+    if(r == -1) {
+        PyErr_SetString(PyExc_IndexError, "facets are not neighbors ..");
+        exit(EXIT_FAILURE);
+    }
+    return r;
 }
 
 double
@@ -505,7 +547,8 @@ FacetFlowNetwork(unsigned int *spx, double *spw, double *spa, double *spd, doubl
                 t = (aa*bc - ab*ac) * dn;
                 if(s >= 0 && t >= 0) {
                     phii = atan2(dy, dx);
-                    phi[i] = phii; 
+                    phi[i] = phii;
+                    //phi[i] = sqrt(dx*dx + dy*dy + dz*dz);
                     if(phii < 0)
                         phii += M_PI;
                     a = sqrt(xa*xa + ya*ya);
@@ -584,20 +627,39 @@ Tubes(unsigned int *spx, double *spw, double *spa,
            const unsigned int *net,
            const unsigned int *tri,
            const unsigned int m,
+           const unsigned int n,
            const double *x,
            const double *y,
            const double *z) {
     double zu, zv, dv;
+    //double tini, tend;
     unsigned int p, q, u, v, w;
-    unsigned int i, j, k, l, s;
-    unsigned int *seen, dest;
+    unsigned int i, j, k, l, s, t;
+    unsigned int msinks, nsinks, mm;
+    unsigned int *seen, *sinks, dst;
+    unsigned int *sinku, *uniqu, *udest;
     Queue *que;
 
-#pragma omp parallel for private(i,j,k,l,s,p,q,u,v,w,zu,zv,dest,seen,que)
+    //tini = omp_get_wtime();
+    // m is number of facets
+    // n is number of points
+    mm = m + m;
+
+    sinks = malloc(mm * 2 * sizeof(unsigned int));
+    sinku = malloc(mm * 2 * sizeof(unsigned int));
+    if(!sinks || !sinku) {
+        PyErr_SetString(PyExc_MemoryError, "...");
+        exit(EXIT_FAILURE);
+    }
+
+//#pragma omp parallel for private(i,j,k,l,s,p,q,u,v,zu,zv,dst)
+//we don't want to have this in parallel because we manipulate spx[l*2+k] = dst
     for(i = 0; i < m; i++) {
         p = i * 2;
         for(j = 0; j < 2; j++) {
             q = p + j;
+            sinks[q] = mm;
+            sinku[q] = n;
             l = spx[q];
             if(l == m)
                 continue;
@@ -606,7 +668,7 @@ Tubes(unsigned int *spx, double *spw, double *spa,
                 // get lowest node of these two facets
                 u = NodeOfSimplicies(tri, i, l, z);
                 zu = z[u];
-                dest = m;
+                dst = m;
                 for(k = net[u]; k < net[u+1]; k++) {
                     v = net[k];
                     if(v == i || v == l)
@@ -617,63 +679,134 @@ Tubes(unsigned int *spx, double *spw, double *spa,
                     if(z[tri[v*3+2]] > zv)
                         zv = z[tri[v*3+2]];
                     if(zv == zu) {
-                        dest = v;
+                        dst = v;
                         break;
                     }
                 }
-                if(dest == m) {
-                    // sinks
-                    que = malloc(sizeof(Queue));
-                    seen = calloc(m, sizeof(unsigned int));
-                    if(!que || !seen) {
-                        PyErr_SetString(PyExc_MemoryError, "...");
-                        exit(EXIT_FAILURE);
-                    }
-                    que->first = que->last = NULL;
-                    for(k = net[u]; k < net[u+1]; k++) {
-                        v = net[k];
-                        seen[v]++;
-                        if(put(que, v, 0)) {
-                            PyErr_SetString(PyExc_MemoryError, "failed to fill queue ..");
-                            exit(EXIT_FAILURE);
-                        }
-                    }
-                    while(!get(que, &v, &dv) && dest == m) {
-                        zv = z[tri[v*3]];
-                        if(z[tri[v*3+1]] > zv)
-                            zv = z[tri[v*3+1]];
-                        if(z[tri[v*3+2]] > zv)
-                            zv = z[tri[v*3+2]];
-                        if(zv < zu) {
-                            dest = v;
-                            break;
-                        }
-                        for(s = 0; s < 3; s++) {
-                            u = tri[v*3+s];
-                            for(k = net[u]; k < net[u+1]; k++) {
-                                w = net[k];
-                                if(seen[w])
-                                    continue;
-                                seen[w]++;
-                                if(put(que, w, dv+1)) {
-                                    PyErr_SetString(PyExc_MemoryError, "failed to fill queue ..");
-                                    exit(EXIT_FAILURE);
-                                }
-                            }
-                        }
-                    }
-                    while(!get(que, &v, &dv));
-                    free(seen);
-                    free(que);
+                if(dst < m) {
+                    spx[q] = dst;
+                    // rewire also the other facet to that lower facet (l->dest)
+                    for(k = 0; k < 2; k++)
+                        if(spx[l*2+k] == i)
+                            spx[l*2+k] = dst;
+                } else {
+                    sinks[q] = q;
+                    sinku[q] = u;
                 }
-                spx[q] = dest;
-                // rewire also the other facet to that lower facet (l->dest)
-                for(k = 0; k < 2; k++)
-                    if(spx[l*2+k] == i)
-                        spx[l*2+k] = dest;
             }
         }
     }
+
+    //tend = omp_get_wtime();
+    //printf("%.4f\n", tend - tini);
+    //tini = tend;
+
+    msinks = 0;
+    for(i = 0; i < mm; i++) {
+        if(sinks[i] < mm) {
+            sinks[msinks] = sinks[i];
+            sinku[msinks++] = sinku[i];
+        }
+    }
+    sinks = realloc(sinks, msinks * sizeof(unsigned int));
+    sinku = realloc(sinku, msinks * sizeof(unsigned int));
+    uniqu = malloc(n * sizeof(unsigned int));
+    udest = malloc(n * sizeof(unsigned int));
+    if(!uniqu || !udest) {
+        PyErr_SetString(PyExc_MemoryError, "...");
+        exit(EXIT_FAILURE);
+    }
+
+#pragma omp parallel for
+    for(i = 0; i < n; i++) {
+        uniqu[i] = n;
+        udest[i] = m;
+    }
+
+    for(i = 0; i < msinks; i++) {
+        u = sinku[i];
+        uniqu[u] = u;
+    }
+    
+    nsinks = 0;
+    for(i = 0; i < n; i++)
+        if(uniqu[i] < n)
+            uniqu[nsinks++] = uniqu[i];
+    uniqu = realloc(uniqu, nsinks * sizeof(unsigned int));
+    
+    fprintf(stderr, "# n: %.1e, m: %.1e, nsinks: %.1e\n", (double)n, (double)m, (double)nsinks);
+    fprintf(stderr, "# point, facet, distance\n");
+    //tend = omp_get_wtime();
+    //printf("%.4f\n", tend - tini);
+    //tini = tend;
+
+#pragma omp parallel for private(i,k,s,t,u,v,w,zu,zv,dv,seen,que) schedule(dynamic, 4)
+    for(i = 0; i < nsinks; i++) {
+        u = uniqu[i];
+        zu = z[u];
+        que = malloc(sizeof(Queue));
+        seen = calloc(m, sizeof(unsigned int));
+        if(!que || !seen) {
+            PyErr_SetString(PyExc_MemoryError, "...");
+            exit(EXIT_FAILURE);
+        }
+        que->first = que->last = NULL;
+        for(k = net[u]; k < net[u+1]; k++) {
+            v = net[k];
+            seen[v]++;
+            if(put(que, v, 0)) {
+                PyErr_SetString(PyExc_MemoryError, "failed to fill queue ..");
+                exit(EXIT_FAILURE);
+            }
+        }
+        while(!get(que, &v, &dv)) {
+            if(dv > 99) {
+                fprintf(stderr, "%i %i %.0f\n", u, m, dv);
+                break;
+            }
+            zv = z[tri[v*3]];
+            if(z[tri[v*3+1]] > zv)
+                zv = z[tri[v*3+1]];
+            if(z[tri[v*3+2]] > zv)
+                zv = z[tri[v*3+2]];
+            if(zv < zu) {
+                udest[u] = v;
+                fprintf(stderr, "%i %i %.0f\n", u, v, dv);
+                break;
+            }
+            for(s = 0; s < 3; s++) {
+                t = tri[v*3+s];
+                for(k = net[t]; k < net[t+1]; k++) {
+                    w = net[k];
+                    if(seen[w])
+                        continue;
+                    seen[w]++;
+                    if(put(que, w, dv+1)) {
+                        PyErr_SetString(PyExc_MemoryError, "failed to fill queue ..");
+                        exit(EXIT_FAILURE);
+                    }
+                }
+            }
+        }
+        while(!get(que, &v, &dv));
+        free(seen);
+        free(que);
+    }
+    free(uniqu);
+
+    //tend = omp_get_wtime();
+    //printf("%.4f\n", tend - tini);
+    //tini = tend;
+
+#pragma omp parallel for private(i,q,u)
+    for(i = 0; i < msinks; i++) {
+        q = sinks[i];
+        u = sinku[i];
+        spx[q] = udest[u];
+    }
+    free(udest);
+    free(sinks);
+    free(sinku);
 
     // fix spw and spa
 #pragma omp parallel for private(i,p)
@@ -689,6 +822,9 @@ Tubes(unsigned int *spx, double *spw, double *spa,
             spw[p+1] = 0;
         }
     }
+    //tend = omp_get_wtime();
+    //printf("%.4f\n", tend - tini);
+    //tini = tend;
 }
 
 static PyObject *
@@ -713,7 +849,7 @@ DemNets_Simplicies(PyObject *self, PyObject* args) {
 static PyObject *
 DemNets_GridAggregate(PyObject *self, PyObject* args) {
     PyObject *xbarg, *ybarg, *xarg, *yarg, *uarg, *varg;
-    PyArrayObject *xb, *yb, *x, *y, *u, *v, *ugrid, *vgrid;
+    PyArrayObject *xb, *yb, *x, *y, *u, *v, *ugrid, *vgrid, *cgrid;
     unsigned int n;
     npy_intp dim[2];
 
@@ -749,13 +885,14 @@ DemNets_GridAggregate(PyObject *self, PyObject* args) {
     dim[1] = (yb->dimensions[0] - 1);
     ugrid = (PyArrayObject *) PyArray_ZEROS(2, dim, PyArray_DOUBLE, 0);
     vgrid = (PyArrayObject *) PyArray_ZEROS(2, dim, PyArray_DOUBLE, 0);
-    if(!ugrid || !vgrid) {
+    cgrid = (PyArrayObject *) PyArray_ZEROS(2, dim, PyArray_UINT, 0);
+    if(!ugrid || !vgrid || !cgrid) {
         PyErr_SetString(PyExc_MemoryError, "...");
         return NULL;
     }
 
     // vectorial mean for each grid cell defined by (xb, yb)
-    GridAggregate((double *)ugrid->data, (double *)vgrid->data,
+    GridAggregate((double *)ugrid->data, (double *)vgrid->data, (unsigned int *)cgrid->data,
                   (double *)xb->data, dim[0],
                   (double *)yb->data, dim[1],
                   (double *)x->data, (double *)y->data,
@@ -767,7 +904,7 @@ DemNets_GridAggregate(PyObject *self, PyObject* args) {
     Py_DECREF(y);
     Py_DECREF(u);
     Py_DECREF(v);
-    return Py_BuildValue("(OO)", ugrid, vgrid);
+    return Py_BuildValue("(OOO)", ugrid, vgrid, cgrid);
 }
 
 static PyObject *
@@ -886,6 +1023,56 @@ DemNets_GridMaximum(PyObject *self, PyObject* args) {
     Py_DECREF(y);
     Py_DECREF(z);
     return PyArray_Return(zgrid);
+}
+
+static PyObject *
+DemNets_Thinning(PyObject *self, PyObject* args) {
+    PyObject *xbarg, *ybarg, *xarg, *yarg, *zarg;
+    PyArrayObject *xb, *yb, *x, *y, *z, *idx;
+    unsigned int n;
+
+    // parse input
+    if(!PyArg_ParseTuple(args, "OOOOO", &xbarg, &ybarg, &xarg, &yarg, &zarg))
+        return NULL;
+    xb = (PyArrayObject *) PyArray_ContiguousFromObject(xbarg, PyArray_DOUBLE, 1, 1);
+    yb = (PyArrayObject *) PyArray_ContiguousFromObject(ybarg, PyArray_DOUBLE, 1, 1);
+    x = (PyArrayObject *) PyArray_ContiguousFromObject(xarg, PyArray_DOUBLE, 1, 1);
+    y = (PyArrayObject *) PyArray_ContiguousFromObject(yarg, PyArray_DOUBLE, 1, 1);
+    z = (PyArrayObject *) PyArray_ContiguousFromObject(zarg, PyArray_DOUBLE, 1, 1);
+    if(!xb || !yb || !x || !y || !z)
+        return NULL;
+
+    // sanity check
+    n = x->dimensions[0];
+    if(n != y->dimensions[0]) {
+        PyErr_SetString(PyExc_IndexError, "dimension mismatch between x and y coordinates.");
+        return NULL;
+    }
+    if(n != z->dimensions[0]) {
+        PyErr_SetString(PyExc_IndexError, "dimension mismatch between variable and coordinates.");
+        return NULL;
+    }
+
+    // alloc numpy array
+    idx = (PyArrayObject *) PyArray_ZEROS(1, x->dimensions, PyArray_INT, 0);
+    if(!idx) {
+        PyErr_SetString(PyExc_MemoryError, "...");
+        return NULL;
+    }
+
+    Thinning((int *)idx->data,
+             (double *)xb->data, xb->dimensions[0],
+             (double *)yb->data, yb->dimensions[0],
+             (double *)x->data,
+             (double *)y->data,
+             (double *)z->data, n);
+
+    Py_DECREF(xb);
+    Py_DECREF(yb);
+    Py_DECREF(x);
+    Py_DECREF(y);
+    Py_DECREF(z);
+    return PyArray_Return(idx);
 }
 
 static PyObject *
@@ -1078,6 +1265,7 @@ DemNets_Tubes(PyObject *self, PyObject* args) {
             (unsigned int *)net->data,
             (unsigned int *)tri->data,
             tri->dimensions[0],
+            x->dimensions[0],
             (double *)x->data,
             (double *)y->data,
             (double *)z->data);
@@ -1096,6 +1284,7 @@ static PyMethodDef DemNets_Methods[] = {
     {"GridAggregate", DemNets_GridAggregate, METH_VARARGS, "..."},
     {"GridAggregateVar", DemNets_GridAggregateVar, METH_VARARGS, "..."},
     {"GridMaximum", DemNets_GridMaximum, METH_VARARGS, "..."},
+    {"Thinning", DemNets_Thinning, METH_VARARGS, "..."},
     {"FacetUpstreamNetwork", DemNets_FacetUpstreamNetwork, METH_VARARGS, "..."},
     {"FacetFlowNetwork", DemNets_FacetFlowNetwork, METH_VARARGS, "..."},
     {"FacetFlowThroughput", DemNets_FacetFlowThroughput, METH_VARARGS, "..."},
